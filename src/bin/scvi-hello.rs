@@ -1,4 +1,5 @@
-use crate::nnutil::*;
+use rust_scvi::nnutil::*;
+use tch::{nn,self};
 
 fn main() {
     let device = tch::Device::cuda_if_available();

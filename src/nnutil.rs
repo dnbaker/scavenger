@@ -9,7 +9,7 @@ pub struct Vae {
 }
 
 impl Vae {
-    fn new(vs: &nn::Path) -> Self {
+    pub fn new(vs: &nn::Path) -> Self {
         Vae {
             fc1: nn::linear(vs / "fc1", 784, 400, Default::default()),
             fc21: nn::linear(vs / "fc21", 400, 20, Default::default()),
@@ -19,16 +19,16 @@ impl Vae {
         }   
     }   
 
-    fn encode(&self, xs: &Tensor) -> (Tensor, Tensor) {
+    pub fn encode(&self, xs: &Tensor) -> (Tensor, Tensor) {
         let h1 = xs.apply(&self.fc1).relu();
         (self.fc21.forward(&h1), self.fc22.forward(&h1))
     }   
 
-    fn decode(&self, zs: &Tensor) -> Tensor {
+    pub fn decode(&self, zs: &Tensor) -> Tensor {
         zs.apply(&self.fc3).relu().apply(&self.fc4).sigmoid()
     }   
 
-    fn forward(&self, xs: &Tensor) -> (Tensor, Tensor, Tensor) {
+    pub fn forward(&self, xs: &Tensor) -> (Tensor, Tensor, Tensor) {
         let (mu, logvar) = self.encode(&xs.view([-1, 784]));
         let std = (&logvar * 0.5).exp();
         let eps = std.randn_like();
