@@ -7,7 +7,7 @@ fn main() {
     let vae = Vae::new(&vs.root());
     println!("Hello, world!");
     let settings =
-        FCLayerSetSettings::new_simple(32000, 256, Some(128), Some(3), Default::default());
+        FCLayerSetSettings::new_simple(128, 128, Some(128), Some(3), Default::default());
     let vs = nn::VarStore::new(Device::cuda_if_available());
     let fclayers = FCLayerSet::new(&vs, settings);
 }
