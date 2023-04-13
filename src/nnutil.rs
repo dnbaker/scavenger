@@ -75,6 +75,62 @@ impl BroadcastingParameter {
 }
 */
 
+#[derive(Clone, Debug, Copy)]
+pub enum Activation {
+    LeakyRelu,
+    Relu,
+    Gelu,
+    Selu,
+    // NoActivation,
+}
+
+fn leaky_relu(xs: &Tensor) -> Tensor {
+    xs.maximum(&(xs * 0.2))
+}
+
+fn relu(xs: &Tensor) -> Tensor {
+    xs.relu()
+}
+fn selu(xs: &Tensor) -> Tensor {
+    xs.selu()
+}
+fn gelu(xs: &Tensor) -> Tensor {
+    xs.gelu("none")
+}
+
+#[derive(Clone, Debug, Copy)]
+pub struct ActivationPlan {
+    activation: Activation,
+    is_squared: bool,
+}
+impl std::default::Default for ActivationPlan {
+    fn default() -> Self {
+        let activation = Activation::LeakyRelu;
+        let is_squared = false;
+        Self {
+            activation,
+            is_squared,
+        }
+    }
+}
+
+impl ActivationPlan {
+    pub fn apply(&self, input: &tch::Tensor) -> tch::Tensor {
+        let mut output = match &self.activation {
+            // Activation::NoActivation => input,
+            Activation::LeakyRelu => leaky_relu(input),
+            Activation::Relu => relu(input),
+            Activation::Selu => selu(input),
+            Activation::Gelu => gelu(input),
+        };
+        if self.is_squared {
+            output.square_()
+        } else {
+            output
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct FCLayerSetSettings {
     pub d_in: i32,
@@ -85,11 +141,7 @@ pub struct FCLayerSetSettings {
     pub dropout: BroadcastingParameter,
     pub batch_norm: Vec<bool>,
     pub layer_norm: Vec<bool>,
-    pub activation: Vec<bool>,
-}
-
-fn leaky_relu(xs: &Tensor) -> Tensor {
-    xs.maximum(&(xs * 0.2))
+    pub activation: Vec<ActivationPlan>,
 }
 
 impl FCLayerSetSettings {
@@ -110,9 +162,9 @@ impl FCLayerSetSettings {
             d_hidden: d_hidden.unwrap_or(128),
             n_layers: n_layers as i32,
             dropout: dropout.unwrap_or(Self::default_dropout(Some(0.125))),
-            batch_norm: vec![true; n_layers],
-            layer_norm: vec![false; n_layers],
-            activation: vec![true; n_layers],
+            batch_norm: vec![false; n_layers],
+            layer_norm: vec![true; n_layers],
+            activation: vec![ActivationPlan::default(); n_layers],
         }
     }
     pub fn make_layer(&self, vs: &nn::VarStore, layer_index: i32) -> SequentialT {
@@ -134,20 +186,27 @@ impl FCLayerSetSettings {
             out_dim,
             Default::default(),
         ));
-        /*
         if self.batch_norm[layer_index as usize] {
             let mut config = BatchNormConfig::default();
             config.momentum = 0.01;
             config.eps = 1e-3;
             ret = ret.add(nn::batch_norm1d(
-                *vs / format!("fclayer{in_dim}:{out_dim}:{layer_index}:batchnorm"),
+                vs.root() / format!("fclayer{in_dim}:{out_dim}:{layer_index}:batchnorm"),
                 out_dim,
                 config,
             ));
         }
-        */
+        if self.layer_norm[layer_index as usize] {
+            let layer_norm = nn::layer_norm(
+                vs.root() / format!("layer_norm{layer_index}"),
+                vec![out_dim],
+                Default::default(),
+            );
+            ret = ret.add(layer_norm);
+        }
         // Dropout doesn't need to be built, but we'll have to include it in the pass.
-        ret = ret.add_fn(leaky_relu);
+        let activation = std::sync::Arc::new(self.activation[layer_index as usize]);
+        ret = ret.add_fn(move |xs| activation.apply(xs));
         let dropout_param = self.dropout.value(layer_index as i64);
         if dropout_param > 0. && dropout_param < 1. {
             ret = ret.add_fn_t(move |xs, train| xs.dropout(dropout_param, train));
