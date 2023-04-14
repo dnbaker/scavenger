@@ -1,3 +1,4 @@
+use clap::Parser;
 use rust_scvi::iter::Iter;
 use rust_scvi::nnutil::*;
 use std::collections::HashMap;
@@ -9,6 +10,14 @@ fn load_data() -> HashMap<String, Tensor> {
     tensors.into_iter().collect::<HashMap<String, Tensor>>()
 }
 const VAR_EPS: f64 = 1e-4;
+
+#[derive(Parser)]
+#[clap(author, version, about)]
+struct Settings {
+    #[clap(long, short)]
+    #[clap(default_value = "10")]
+    pub num_epochs: i32,
+}
 
 fn sample(input: &Tensor) -> (Tensor, Tensor, Tensor) {
     let mut stdeps = input.chunk(2, -1);
@@ -23,6 +32,7 @@ fn sample(input: &Tensor) -> (Tensor, Tensor, Tensor) {
 }
 
 fn main() -> Result<(), TchError> {
+    let settings = Settings::parse();
     let data = load_data();
     println!("Hello, world!");
     let latent_dim: i64 = 16;
@@ -63,7 +73,7 @@ fn main() -> Result<(), TchError> {
     eprintln!("Dataset of size {num_rows}/{num_cols}");
     let mut opt = nn::Adam::default().build(&vs, 1e-4)?;
     println!("Net built");
-    for epoch in 0..5 {
+    for epoch in 0..settings.num_epochs {
         println!("Epoch {epoch}");
         let mut rloss_sum = 0.;
         let mut klloss_sum = 0.;

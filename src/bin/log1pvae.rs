@@ -1,7 +1,16 @@
+use clap::Parser;
 use rust_scvi::iter::Iter;
 use rust_scvi::nnutil::*;
 use std::collections::HashMap;
 use tch::{self, nn, nn::ModuleT, nn::OptimizerConfig, *};
+
+#[derive(Parser)]
+#[clap(author, version, about)]
+struct Settings {
+    #[clap(long, short)]
+    #[clap(default_value = "10")]
+    pub num_epochs: i32,
+}
 
 fn load_data() -> HashMap<String, Tensor> {
     let source = "/Users/dnb13/Desktop/code/compressed_bundle/PBMC/pbmc.sparse.npz";
@@ -23,6 +32,7 @@ fn sample(input: &Tensor) -> (Tensor, Tensor, Tensor) {
 }
 
 fn main() -> Result<(), TchError> {
+    let settings = Settings::parse();
     let data = load_data();
     println!("Hello, world!");
     let latent_dim: i64 = 32;

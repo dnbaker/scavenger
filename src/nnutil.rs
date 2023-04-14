@@ -52,10 +52,26 @@ impl BroadcastingParameter {
             .unwrap_or(self.data.first().unwrap()))
     }
     pub fn from_value(val: f64) -> Self {
-        Self { data: vec![val] }
+        Self::from(val)
     }
-    pub fn from_vec(vals: Vec<f64>) -> Self {
-        Self { data: vals }
+    pub fn from_vec(vals: &Vec<f64>) -> Self {
+        Self::from(vals)
+    }
+}
+
+impl std::convert::From<f64> for BroadcastingParameter {
+    fn from(x: f64) -> Self {
+        Self::from_value(x)
+    }
+}
+impl std::convert::From<&[f64]> for BroadcastingParameter {
+    fn from(x: &[f64]) -> Self {
+        Self { data: x.to_vec() }
+    }
+}
+impl std::convert::From<&Vec<f64>> for BroadcastingParameter {
+    fn from(x: &Vec<f64>) -> Self {
+        Self::from(&x[..])
     }
 }
 
@@ -275,7 +291,6 @@ impl ZINBDecoder {
         train: bool,
     ) -> (Tensor, Tensor, Tensor, Tensor) {
         let px = self.fclayers.layers.forward_t(&input, train);
-        let r_dropout = self.px_r_scale_dropout_decoder.forward_t(&px, train);
         let mut r_dropout = input.chunk(3, -1);
         let px_scale = r_dropout.remove(2);
         let px_scale = if self.use_size_factor_key {
