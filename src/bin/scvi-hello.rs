@@ -8,15 +8,9 @@ fn main() -> Result<(), TchError> {
     let mnist = vision::mnist::load_dir("data")?;
     let device = tch::Device::cuda_if_available();
     let vs = nn::VarStore::new(device);
-    let vae = Vae::new(&vs.root());
     println!("Hello, world!");
-    let settings = FCLayerSetSettings::new_simple(
-        IMAGE_DIM as i32,
-        64,
-        Some(LABELS as i32),
-        Some(3),
-        Default::default(),
-    );
+    let settings =
+        FCLayerSetSettings::new_simple(IMAGE_DIM, 64, Some(LABELS), Some(3), Default::default());
     let vs = nn::VarStore::new(Device::cuda_if_available());
     let fclayers = FCLayerSet::new(&vs, settings);
     let net = &fclayers.layers;

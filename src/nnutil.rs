@@ -1,6 +1,6 @@
 use tch::{
-    nn, nn::BatchNormConfig, nn::Module, nn::OptimizerConfig, nn::SequentialT, Kind, Reduction,
-    TchError, Tensor,
+    nn, nn::BatchNormConfig, nn::Module, nn::OptimizerConfig, nn::SequentialT, Device, Kind,
+    Reduction, TchError, Tensor,
 };
 
 pub struct Vae {
@@ -130,13 +130,12 @@ impl ActivationPlan {
         }
     }
 }
-
 #[derive(Clone, Debug)]
 pub struct FCLayerSetSettings {
-    pub d_in: i32,
-    pub d_out: i32,
-    pub d_hidden: i32,
-    pub n_layers: i32,
+    pub d_in: i64,
+    pub d_out: i64,
+    pub d_hidden: i64,
+    pub n_layers: i64,
     // Either a singular value, or one per layer
     pub dropout: BroadcastingParameter,
     pub batch_norm: Vec<bool>,
@@ -149,10 +148,10 @@ impl FCLayerSetSettings {
         BroadcastingParameter::from_value(value.unwrap_or(0.1))
     }
     pub fn new_simple(
-        d_in: i32,
-        d_out: i32,
-        d_hidden: Option<i32>,
-        n_layers: Option<i32>,
+        d_in: i64,
+        d_out: i64,
+        d_hidden: Option<i64>,
+        n_layers: Option<i64>,
         dropout: Option<BroadcastingParameter>,
     ) -> Self {
         let n_layers: usize = n_layers.unwrap_or(1) as usize;
@@ -160,25 +159,26 @@ impl FCLayerSetSettings {
             d_in,
             d_out,
             d_hidden: d_hidden.unwrap_or(128),
-            n_layers: n_layers as i32,
+            n_layers: n_layers as i64,
             dropout: dropout.unwrap_or(Self::default_dropout(Some(0.125))),
             batch_norm: vec![false; n_layers],
             layer_norm: vec![true; n_layers],
             activation: vec![ActivationPlan::default(); n_layers],
         }
     }
-    pub fn make_layer(&self, vs: &nn::VarStore, layer_index: i32) -> SequentialT {
+    pub fn make_layer(&self, vs: &nn::VarStore, layer_index: i64) -> SequentialT {
         let mut ret = nn::seq_t();
-        let in_dim = (if layer_index == 0 {
+        let in_dim = if layer_index == 0 {
             self.d_in
         } else {
             self.d_hidden
-        }) as i64;
-        let out_dim = (if layer_index == self.n_layers - 1 {
+        };
+        let out_dim = if layer_index == self.n_layers - 1 {
             self.d_out
         } else {
             self.d_hidden
-        }) as i64;
+        };
+        eprintln!("Layer {layer_index} in layer has {in_dim} in and {out_dim} out");
         ret = ret.add(nn::linear(
             // *vs / format!("fclayer{in_dim}:{out_dim}:{layer_index}:linear"),
             vs.root(),
@@ -187,9 +187,11 @@ impl FCLayerSetSettings {
             Default::default(),
         ));
         if self.batch_norm[layer_index as usize] {
-            let mut config = BatchNormConfig::default();
-            config.momentum = 0.01;
-            config.eps = 1e-3;
+            let config = BatchNormConfig {
+                momentum: 0.01,
+                eps: 1e-3,
+                ..Default::default()
+            };
             ret = ret.add(nn::batch_norm1d(
                 vs.root() / format!("fclayer{in_dim}:{out_dim}:{layer_index}:batchnorm"),
                 out_dim,
@@ -207,7 +209,7 @@ impl FCLayerSetSettings {
         // Dropout doesn't need to be built, but we'll have to include it in the pass.
         let activation = std::sync::Arc::new(self.activation[layer_index as usize]);
         ret = ret.add_fn(move |xs| activation.apply(xs));
-        let dropout_param = self.dropout.value(layer_index as i64);
+        let dropout_param = self.dropout.value(layer_index);
         if dropout_param > 0. && dropout_param < 1. {
             ret = ret.add_fn_t(move |xs, train| xs.dropout(dropout_param, train));
         }
@@ -227,5 +229,15 @@ impl FCLayerSet {
             layers = layers.add(settings.make_layer(vs, layer_index));
         }
         Self { settings, layers }
+    }
+}
+
+pub fn best_device_available() -> Device {
+    if tch::Cuda::is_available() {
+        Device::Cuda(0)
+    } else if tch::utils::has_mps() {
+        Device::Mps
+    } else {
+        Device::Cpu
     }
 }
