@@ -25,13 +25,13 @@ fn sample(input: &Tensor) -> (Tensor, Tensor, Tensor) {
 fn main() -> Result<(), TchError> {
     let data = load_data();
     println!("Hello, world!");
-    let latent_dim: i64 = 16;
+    let latent_dim: i64 = 32;
     let labels = &data["labels"];
     let data = &data["data"];
     let data_dim = data.size2()?.1;
     tch::manual_seed(13i64);
-    const NLAYERS: i64 = 2i64;
-    const HIDDEN_DIM: i64 = 32i64;
+    const NLAYERS: i64 = 3i64;
+    const HIDDEN_DIM: i64 = 64i64;
     let encoder_settings = FCLayerSetSettings::new_simple(
         data_dim,
         latent_dim,

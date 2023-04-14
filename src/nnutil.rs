@@ -1,6 +1,6 @@
 use tch::{
-    nn, nn::BatchNormConfig, nn::Module, nn::OptimizerConfig, nn::SequentialT, Device, Kind,
-    Reduction, TchError, Tensor,
+    nn, nn::BatchNormConfig, nn::Module, nn::ModuleT, nn::OptimizerConfig, nn::SequentialT, Device,
+    Kind, Reduction, TchError, Tensor,
 };
 
 pub struct Vae {
@@ -239,5 +239,83 @@ pub fn best_device_available() -> Device {
         Device::Mps
     } else {
         Device::Cpu
+    }
+}
+
+pub enum ScaleAct {
+    SoftMax,
+    SoftPlus,
+}
+
+pub struct ZINBDecoder {
+    // Important: make sure there's no dropout here.
+    pub fclayers: FCLayerSet,
+    pub px_r_scale_dropout_decoder: tch::nn::Linear, // This layer emits both x and r. We then chunk it to extract r and dropout separately.
+    use_size_factor_key: bool,
+}
+
+/*
+#if 0
+#endif
+        # dispersion: here we only deal with gene-cell dispersion case
+        self.px_r_decoder = nn.Linear(n_hidden, n_output)
+
+        # dropout
+        self.px_dropout_decoder = nn.Linear(n_hidden, n_output)
+*/
+
+impl ZINBDecoder {
+    fn hidden_dim(&self) -> i64 {
+        return self.fclayers.settings.d_hidden;
+    }
+    pub fn decode(
+        &self,
+        input: &tch::Tensor,
+        library_size: &tch::Tensor,
+        train: bool,
+    ) -> (Tensor, Tensor, Tensor, Tensor) {
+        let px = self.fclayers.layers.forward_t(&input, train);
+        let r_dropout = self.px_r_scale_dropout_decoder.forward_t(&px, train);
+        let mut r_dropout = input.chunk(3, -1);
+        let px_scale = r_dropout.remove(2);
+        let px_scale = if self.use_size_factor_key {
+            px_scale.softmax(-1, Kind::Float)
+        } else {
+            px_scale.softplus()
+        };
+        let dropout = r_dropout.remove(1);
+        let r = r_dropout.remove(0);
+        let px_rate = library_size.exp() * &px_scale;
+        return (px_scale, r, px_rate, dropout);
+    }
+    pub fn create(vs: &nn::VarStore, fclayers: FCLayerSet, use_size_factor_key: bool) -> Self {
+        /*
+        let mut scale_decoder = nn::seq_t().add(nn::linear(
+            vs.root(),
+            self.fclayers.settings.d_hidden,
+            self.fclayers.settings.d_out,
+            Default::default(),
+        ));
+        if !self.use_size_factor_key {
+        scale_decoder = scale_decoder.add_fn(|xs, t| {
+            xs.softmax(-1, Kind::Float);
+        });
+        } else {
+        scale_decoder = scale_decoder.add_fn(|xs| {
+            xs.softplus();
+        });
+        }
+        */
+        let px_r_scale_dropout_decoder = nn::linear(
+            vs.root(),
+            fclayers.settings.d_hidden,
+            fclayers.settings.d_out * 3,
+            Default::default(),
+        );
+        Self {
+            fclayers,
+            use_size_factor_key,
+            px_r_scale_dropout_decoder,
+        }
     }
 }
