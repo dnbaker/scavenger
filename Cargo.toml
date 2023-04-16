@@ -11,3 +11,5 @@ default-run = "vae-zinb"
 tch = { version = "0.11.0", path = "../tch2-rs" }
 memmap = "*"
 clap = {version = "*", features = ["derive"]}
+log = "*"
+env_logger = "*"

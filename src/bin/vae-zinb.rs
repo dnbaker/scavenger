@@ -41,9 +41,16 @@ struct Settings {
     #[clap(default_value = "8")]
     pub report_index: i64,
 
+    #[clap(long)]
+    #[clap(default_value = "13")]
+    pub seed: i64,
+
     #[clap(long, short)]
     #[clap(default_value = "10.")]
     pub kl_scale: f64,
+
+    #[clap(long)]
+    pub log1p: bool,
 }
 
 fn sample(input: &Tensor) -> (Tensor, Tensor, Tensor) {
@@ -60,16 +67,19 @@ fn sample(input: &Tensor) -> (Tensor, Tensor, Tensor) {
 
 fn main() -> Result<(), TchError> {
     let settings = Settings::parse();
+    env_logger::builder()
+        .filter_level(log::LevelFilter::Info)
+        .init();
     let data = load_data();
     println!("Hello, world!");
     let latent_dim: i64 = 32;
     let labels = &data["labels"];
     let data = &data["data"];
     let data_dim = data.size2()?.1;
-    tch::manual_seed(13i64);
+    tch::manual_seed(settings.seed);
     let n_layers = settings.n_layers;
     const HIDDEN_DIM: i64 = 64i64;
-    eprintln!("Set seed");
+    log::info!("Set seed");
     let encoder_settings = FCLayerSetSettings::new_simple(
         data_dim,
         latent_dim,
@@ -77,7 +87,7 @@ fn main() -> Result<(), TchError> {
         Some(n_layers),
         Default::default(),
     );
-    eprintln!("Made settings for enc");
+    log::info!("Made settings for enc");
     let mut decoder_settings = FCLayerSetSettings::new_simple(
         latent_dim,
         HIDDEN_DIM,
@@ -86,9 +96,9 @@ fn main() -> Result<(), TchError> {
         Default::default(),
     );
     decoder_settings.no_dropout();
-    eprintln!("Created: enc/dec settings");
+    log::info!("Created: enc/dec settings");
     let vs = nn::VarStore::new(best_device_available());
-    eprintln!("Created: varstore");
+    log::info!("Created: varstore");
     let meanvar_encoder = nn::linear(
         vs.root(),
         encoder_settings.d_out,
@@ -98,7 +108,11 @@ fn main() -> Result<(), TchError> {
     eprintln!("Device: {:?}", vs.device());
     let fclayers = FCLayerSet::new(&vs, encoder_settings);
     let zinb_decoder = ZINBDecoder::new(&vs, FCLayerSet::new(&vs, decoder_settings), data_dim);
-    let net = nn::seq_t().add(fclayers.layers).add(meanvar_encoder);
+    let mut net = nn::seq_t();
+    if settings.log1p {
+        net = net.add_fn(|xs| xs.log1p());
+    }
+    net = net.add(fclayers.layers).add(meanvar_encoder);
     let batch_size = settings.batch_size;
     let num_rows = data.size2()?.0;
     let num_cols = data.size2()?.1;
@@ -109,6 +123,7 @@ fn main() -> Result<(), TchError> {
         println!("Epoch {epoch}");
         let mut rloss_sum = 0.;
         let mut klloss_sum = 0.;
+        let mut total_samples = 0;
         // let varsum = Tensor::zeros(&[latent_dim]);
         for (batch_index, (bdata, _)) in Iter::new(data, Some(labels), batch_size)
             .shuffle()
@@ -116,6 +131,7 @@ fn main() -> Result<(), TchError> {
             .enumerate()
         {
             const TRAIN: bool = true;
+            total_samples += bdata.size2().unwrap().0 as i32;
             let bdata = bdata.to_kind(tch::Kind::Float).log1p();
             let latent = net.forward_t(&bdata, TRAIN);
             let (sampled_data, mu, logvar) = sample(&latent);
@@ -133,11 +149,11 @@ fn main() -> Result<(), TchError> {
             opt.backward_step(&loss);
             if batch_index % settings.report_index as usize == 0 {
                 let num_processed = (batch_index + 1) * batch_size as usize;
-                println!(
+                log::info!(
                     "epoch: {:4} after {num_processed} mean train error of this epoch: recon {:5.2}, kl {:5.2}, total {:5.2}",
                     epoch,
-                    rloss_sum / (batch_index + 1) as f64,
-                    klloss_sum / (batch_index + 1) as f64,
+                    rloss_sum / (total_samples as f64),
+                    klloss_sum / (total_samples as f64),
                     (klloss_sum + rloss_sum) / (batch_index + 1) as f64,
                 );
             }
@@ -145,5 +161,14 @@ fn main() -> Result<(), TchError> {
         let loss_sum = rloss_sum + klloss_sum;
         println!("epoch: {:4} train error: {:5.2}", epoch, loss_sum);
     }
+    vs.save(format!(
+        "vae-pbmc.epochs.{}.hid.{}.latent.{}.nlayers.{}.seed.{}.ot",
+        settings.num_epochs,
+        settings.hidden_dim,
+        settings.latent_dim,
+        settings.n_layers,
+        settings.seed,
+    ))
+    .unwrap();
     Ok(())
 }

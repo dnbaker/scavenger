@@ -95,6 +95,7 @@ pub enum Activation {
     Relu,
     Gelu,
     Selu,
+    Mish,
     // NoActivation,
 }
 
@@ -136,11 +137,21 @@ impl ActivationPlan {
             Activation::Relu => relu(input),
             Activation::Selu => selu(input),
             Activation::Gelu => gelu(input),
+            Activation::Mish => input.mish(),
         };
         if self.is_squared {
             output.square_()
         } else {
             output
+        }
+    }
+    pub fn apply_inplace(&self, input: &mut tch::Tensor) -> Tensor {
+        match &self.activation {
+            Activation::LeakyRelu => input.leaky_relu_(),
+            Activation::Relu => input.relu_(),
+            Activation::Selu => input.selu_(),
+            Activation::Gelu => input.gelu_("none"),
+            Activation::Mish => input.mish_(),
         }
     }
 }
