@@ -17,6 +17,10 @@ struct Settings {
     #[clap(long, short)]
     #[clap(default_value = "10")]
     pub num_epochs: i32,
+
+    #[clap(long, short)]
+    #[clap(default_value = "16")]
+    pub batch_size: i64,
 }
 
 fn sample(input: &Tensor) -> (Tensor, Tensor, Tensor) {
@@ -42,6 +46,7 @@ fn main() -> Result<(), TchError> {
     tch::manual_seed(13i64);
     const NLAYERS: i64 = 2i64;
     const HIDDEN_DIM: i64 = 32i64;
+    eprintln!("Set seed");
     let encoder_settings = FCLayerSetSettings::new_simple(
         data_dim,
         latent_dim,
@@ -49,6 +54,7 @@ fn main() -> Result<(), TchError> {
         Some(NLAYERS),
         Default::default(),
     );
+    eprintln!("Made settings for enc");
     let decoder_settings = FCLayerSetSettings::new_simple(
         latent_dim,
         data_dim,
@@ -56,7 +62,9 @@ fn main() -> Result<(), TchError> {
         Some(NLAYERS),
         Default::default(),
     );
+    eprintln!("Created: enc/dec settings");
     let vs = nn::VarStore::new(best_device_available());
+    eprintln!("Created: varstore");
     let meanvar_encoder = nn::linear(
         vs.root(),
         encoder_settings.d_out,
@@ -67,7 +75,7 @@ fn main() -> Result<(), TchError> {
     let fclayers = FCLayerSet::new(&vs, encoder_settings);
     let decoder_fclayers = FCLayerSet::new(&vs, decoder_settings);
     let net = nn::seq_t().add(fclayers.layers).add(meanvar_encoder);
-    const BATCH_SIZE: i64 = 64;
+    let batch_size = settings.batch_size;
     let num_rows = data.size2()?.0;
     let num_cols = data.size2()?.1;
     eprintln!("Dataset of size {num_rows}/{num_cols}");
@@ -78,7 +86,7 @@ fn main() -> Result<(), TchError> {
         let mut rloss_sum = 0.;
         let mut klloss_sum = 0.;
         // let varsum = Tensor::zeros(&[latent_dim]);
-        for (batch_index, (bdata, _)) in Iter::new(data, Some(labels), BATCH_SIZE)
+        for (batch_index, (bdata, _)) in Iter::new(data, Some(labels), batch_size)
             .shuffle()
             .to_device(vs.device())
             .enumerate()
@@ -95,7 +103,7 @@ fn main() -> Result<(), TchError> {
             let loss = recon_loss + kl_loss;
             opt.backward_step(&loss);
             if batch_index % 64 == 0 {
-                let num_processed = (batch_index + 1) * BATCH_SIZE as usize;
+                let num_processed = (batch_index + 1) * batch_size as usize;
                 println!(
                     "epoch: {:4} after {num_processed} mean train error of this epoch: recon {:5.2}, kl {:5.2}, total {:5.2}",
                     epoch,

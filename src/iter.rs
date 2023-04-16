@@ -1,7 +1,4 @@
-use tch::{
-    nn, nn::BatchNormConfig, nn::Module, nn::OptimizerConfig, nn::SequentialT, Device, IndexOp,
-    Kind, Reduction, TchError, Tensor,
-};
+use tch::{Device, IndexOp, Kind, TchError, Tensor};
 
 /// An iterator over a pair of tensors which have the same first dimension
 /// size.

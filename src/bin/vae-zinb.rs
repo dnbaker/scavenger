@@ -4,20 +4,47 @@ use rust_scvi::nnutil::*;
 use std::collections::HashMap;
 use tch::{self, nn, nn::ModuleT, nn::OptimizerConfig, *};
 
-#[derive(Parser)]
-#[clap(author, version, about)]
-struct Settings {
-    #[clap(long, short)]
-    #[clap(default_value = "10")]
-    pub num_epochs: i32,
-}
-
 fn load_data() -> HashMap<String, Tensor> {
     let source = "/Users/dnb13/Desktop/code/compressed_bundle/PBMC/pbmc.sparse.npz";
     let tensors = tch::Tensor::read_npz(source).unwrap();
     tensors.into_iter().collect::<HashMap<String, Tensor>>()
 }
 const VAR_EPS: f64 = 1e-4;
+
+#[derive(Parser)]
+#[clap(author, version, about)]
+struct Settings {
+    #[clap(long, short)]
+    #[clap(default_value = "10")]
+    pub num_epochs: i32,
+
+    #[clap(long, short)]
+    #[clap(default_value = "1")]
+    pub batch_size: i64,
+
+    #[clap(long)]
+    #[clap(short = 'l')]
+    #[clap(default_value = "3")]
+    pub n_layers: i64,
+
+    #[clap(long)]
+    #[clap(short = 'H')]
+    #[clap(default_value = "64")]
+    pub hidden_dim: i64,
+
+    #[clap(long)]
+    #[clap(short = 'L')]
+    #[clap(default_value = "48")]
+    pub latent_dim: i64,
+
+    #[clap(long, short)]
+    #[clap(default_value = "8")]
+    pub report_index: i64,
+
+    #[clap(long, short)]
+    #[clap(default_value = "10.")]
+    pub kl_scale: f64,
+}
 
 fn sample(input: &Tensor) -> (Tensor, Tensor, Tensor) {
     let mut stdeps = input.chunk(2, -1);
@@ -40,26 +67,28 @@ fn main() -> Result<(), TchError> {
     let data = &data["data"];
     let data_dim = data.size2()?.1;
     tch::manual_seed(13i64);
-    const NLAYERS: i64 = 3i64;
+    let n_layers = settings.n_layers;
     const HIDDEN_DIM: i64 = 64i64;
-    println!("Making enc/dec");
+    eprintln!("Set seed");
     let encoder_settings = FCLayerSetSettings::new_simple(
         data_dim,
         latent_dim,
         Some(HIDDEN_DIM),
-        Some(NLAYERS),
+        Some(n_layers),
         Default::default(),
     );
-    let decoder_settings = FCLayerSetSettings::new_simple(
+    eprintln!("Made settings for enc");
+    let mut decoder_settings = FCLayerSetSettings::new_simple(
         latent_dim,
-        data_dim,
+        HIDDEN_DIM,
         Some(HIDDEN_DIM),
-        Some(NLAYERS),
+        Some(n_layers),
         Default::default(),
     );
-    println!("Made enc/dec");
+    decoder_settings.no_dropout();
+    eprintln!("Created: enc/dec settings");
     let vs = nn::VarStore::new(best_device_available());
-    println!("Made meanvar enc");
+    eprintln!("Created: varstore");
     let meanvar_encoder = nn::linear(
         vs.root(),
         encoder_settings.d_out,
@@ -68,9 +97,9 @@ fn main() -> Result<(), TchError> {
     );
     eprintln!("Device: {:?}", vs.device());
     let fclayers = FCLayerSet::new(&vs, encoder_settings);
-    let decoder_fclayers = FCLayerSet::new(&vs, decoder_settings);
+    let zinb_decoder = ZINBDecoder::new(&vs, FCLayerSet::new(&vs, decoder_settings), data_dim);
     let net = nn::seq_t().add(fclayers.layers).add(meanvar_encoder);
-    const BATCH_SIZE: i64 = 64;
+    let batch_size = settings.batch_size;
     let num_rows = data.size2()?.0;
     let num_cols = data.size2()?.1;
     eprintln!("Dataset of size {num_rows}/{num_cols}");
@@ -81,24 +110,29 @@ fn main() -> Result<(), TchError> {
         let mut rloss_sum = 0.;
         let mut klloss_sum = 0.;
         // let varsum = Tensor::zeros(&[latent_dim]);
-        for (batch_index, (bdata, _)) in Iter::new(data, Some(labels), BATCH_SIZE)
+        for (batch_index, (bdata, _)) in Iter::new(data, Some(labels), batch_size)
             .shuffle()
             .to_device(vs.device())
             .enumerate()
         {
+            const TRAIN: bool = true;
             let bdata = bdata.to_kind(tch::Kind::Float).log1p();
-            let latent = net.forward_t(&bdata, true);
+            let latent = net.forward_t(&bdata, TRAIN);
             let (sampled_data, mu, logvar) = sample(&latent);
-            let decoded = decoder_fclayers.layers.forward_t(&sampled_data, true);
-            let recon_loss = decoded.mse_loss(&bdata, tch::Reduction::Mean);
+            let library_size = &bdata
+                .sum_dim_intlist(Some([1].as_slice()), false, bdata.kind())
+                .log()
+                .unsqueeze(1i64);
+            let decoded = zinb_decoder.decode(&sampled_data, library_size, TRAIN);
+            let recon_loss = -decoded.log_prob(&bdata).sum(tch::Kind::Float);
             let kl_loss: Tensor =
                 -0.5 * (1i64 + &logvar - mu.pow_tensor_scalar(2) - logvar.exp()).sum(Kind::Float);
             rloss_sum += &recon_loss.double_value(&[]);
             klloss_sum += &kl_loss.double_value(&[]);
-            let loss = recon_loss + kl_loss;
+            let loss = recon_loss + kl_loss * settings.kl_scale;
             opt.backward_step(&loss);
-            if batch_index % 64 == 0 {
-                let num_processed = (batch_index + 1) * BATCH_SIZE as usize;
+            if batch_index % settings.report_index as usize == 0 {
+                let num_processed = (batch_index + 1) * batch_size as usize;
                 println!(
                     "epoch: {:4} after {num_processed} mean train error of this epoch: recon {:5.2}, kl {:5.2}, total {:5.2}",
                     epoch,

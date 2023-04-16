@@ -1,7 +1,8 @@
 use tch::{
-    nn, nn::BatchNormConfig, nn::Module, nn::ModuleT, nn::OptimizerConfig, nn::SequentialT, Device,
-    Kind, Reduction, TchError, Tensor,
+    nn, nn::BatchNormConfig, nn::Module, nn::ModuleT, nn::SequentialT, Device, Kind, Tensor,
 };
+
+pub const VAR_EPS: f64 = 1e-5;
 
 pub struct Vae {
     fc1: nn::Linear,
@@ -51,9 +52,6 @@ impl BroadcastingParameter {
             .get(index as usize)
             .unwrap_or(self.data.first().unwrap()))
     }
-    pub fn from_value(val: f64) -> Self {
-        Self::from(val)
-    }
     pub fn from_vec(vals: &Vec<f64>) -> Self {
         Self::from(vals)
     }
@@ -61,7 +59,7 @@ impl BroadcastingParameter {
 
 impl std::convert::From<f64> for BroadcastingParameter {
     fn from(x: f64) -> Self {
-        Self::from_value(x)
+        Self { data: vec![x] }
     }
 }
 impl std::convert::From<&[f64]> for BroadcastingParameter {
@@ -161,7 +159,10 @@ pub struct FCLayerSetSettings {
 
 impl FCLayerSetSettings {
     pub fn default_dropout(value: Option<f64>) -> BroadcastingParameter {
-        BroadcastingParameter::from_value(value.unwrap_or(0.1))
+        BroadcastingParameter::from(value.unwrap_or(0.1))
+    }
+    pub fn no_dropout(&mut self) {
+        self.dropout = BroadcastingParameter::from(0.);
     }
     pub fn new_simple(
         d_in: i64,
@@ -171,6 +172,7 @@ impl FCLayerSetSettings {
         dropout: Option<BroadcastingParameter>,
     ) -> Self {
         let n_layers: usize = n_layers.unwrap_or(1) as usize;
+        eprintln!("n layers: {n_layers}");
         Self {
             d_in,
             d_out,
@@ -242,6 +244,7 @@ impl FCLayerSet {
     pub fn new(vs: &nn::VarStore, settings: FCLayerSetSettings) -> Self {
         let mut layers = nn::seq_t();
         for layer_index in 0..settings.n_layers {
+            eprintln!("making layer {layer_index}");
             layers = layers.add(settings.make_layer(vs, layer_index));
         }
         Self { settings, layers }
@@ -258,18 +261,14 @@ pub fn best_device_available() -> Device {
     }
 }
 
-pub enum ScaleAct {
-    SoftMax,
-    SoftPlus,
-}
-
 pub struct ZINBDecoder {
     // Important: make sure there's no dropout here.
     pub fclayers: FCLayerSet,
-    pub px_r_scale_dropout_decoder: tch::nn::Linear, // This layer emits both x and r. We then chunk it to extract r and dropout separately.
+    pub px_r_scale_dropout_decoder: tch::nn::Linear, // This layer emits x and r, and dropout. We then chunk it to extract x, r and dropout separately.
     use_size_factor_key: bool,
 }
 
+// For parsing from CSR
 /*
 #if 0
 #endif
@@ -280,30 +279,151 @@ pub struct ZINBDecoder {
         self.px_dropout_decoder = nn.Linear(n_hidden, n_output)
 */
 
+/*
+    pub fn sparse_csr_tensor(
+        crow_indices: &Tensor,
+        col_indices: &Tensor,
+        values: &Tensor,
+        options: (Kind, Device),
+    ) -> Tensor {
+        Tensor::f_sparse_csr_tensor(crow_indices, col_indices, values, options).unwrap()
+    }
+    pub fn sparse_csr_tensor_crow_col_value_size(
+        crow_indices: &Tensor,
+        col_indices: &Tensor,
+        values: &Tensor,
+        size: &[i64],
+        options: (Kind, Device),
+    ) -> Tensor {
+        Tensor::f_sparse_csr_tensor_crow_col_value_size(
+            crow_indices,
+            col_indices,
+            values,
+            size,
+            options,
+        )
+        .unwrap()
+    }
+*/
+
+pub struct ZINB {
+    mu: Tensor,
+    theta: Tensor,
+    zi_logits: Tensor,
+    scale: Tensor,
+}
+
+impl ZINB {
+    pub fn new(inputs: (Tensor, Tensor, Tensor, Tensor)) -> Self {
+        Self {
+            mu: inputs.2,        // rate
+            theta: inputs.1,     // r
+            zi_logits: inputs.3, // dropout, aka pi
+            scale: inputs.0,     // scale
+        }
+    }
+    pub fn scale_v(&self) -> &Tensor {
+        &self.scale
+    }
+    pub fn theta_v(&self) -> &Tensor {
+        &self.theta
+    }
+    pub fn pi(&self) -> &Tensor {
+        &self.zi_logits
+    }
+    pub fn zi_logits_v(&self) -> &Tensor {
+        &self.zi_logits
+    }
+    pub fn mu_v(&self) -> &Tensor {
+        &self.mu
+    }
+    pub fn log_prob(&self, x: &Tensor) -> tch::Tensor {
+        self.log_likelihood(x)
+    }
+    pub fn log_likelihood(&self, x: &Tensor) -> tch::Tensor {
+        // eprintln!("Started");
+        let softplus_pi = (-self.pi()).softplus();
+
+        let theta_eps = &self.theta + VAR_EPS;
+        let mu_theta_eps = &theta_eps + &self.mu;
+
+        let log_theta_mu_eps = mu_theta_eps.log();
+        let log_theta_eps = theta_eps.log();
+
+        let pi_theta_log = -self.pi() + &self.theta * (&log_theta_eps - &log_theta_mu_eps);
+        let log_mu_eps = (&self.mu + VAR_EPS).log();
+        //eprintln!("Made pi theta and log mu");
+
+        let case_zero = (pi_theta_log).softplus() - &softplus_pi;
+        //eprintln!("case_zero_shape: {:?}", case_zero.size2());
+        //eprintln!("Shape of softplus_pi:{softplus_pi}");
+        //eprintln!("Shape of pi_theta_log:{pi_theta_log}");
+        //eprintln!("Shape of log_mu_eps:{log_mu_eps}");
+        /*eprintln!(
+            "Shape of log_theta_mu_eps:{log_theta_mu_eps},{:?}",
+            log_theta_mu_eps.size2()
+        );
+        */
+        //eprintln!("Shape of x:{x},{:?}", x.size2());
+        let case_non_zero = -softplus_pi
+            + pi_theta_log
+            + x * (log_mu_eps - log_theta_mu_eps)
+            + (x + &self.theta).lgamma()
+            - &self.theta.lgamma()
+            - (x + 1).lgamma();
+        //eprintln!("made case_non_zero. Shape: {:?}", case_non_zero.size2());
+
+        let xlt_eps = x.less(tch::Scalar::from(VAR_EPS));
+        let xge_eps = xlt_eps.logical_not();
+
+        //eprintln!("Made cases");
+        let mul_case_zero = case_zero * xlt_eps.internal_cast_float(/*non_blocking=*/ false);
+        let mul_case_nonzero = case_non_zero * xge_eps.internal_cast_float(false);
+        //eprintln!("Made mulcases");
+        mul_case_zero + mul_case_nonzero
+    }
+}
+
 impl ZINBDecoder {
-    fn hidden_dim(&self) -> i64 {
+    pub fn hidden_dim(&self) -> i64 {
         return self.fclayers.settings.d_hidden;
     }
-    pub fn decode(
-        &self,
-        input: &tch::Tensor,
-        library_size: &tch::Tensor,
-        train: bool,
-    ) -> (Tensor, Tensor, Tensor, Tensor) {
+    pub fn decode(&self, input: &tch::Tensor, library_size: &tch::Tensor, train: bool) -> ZINB {
         let px = self.fclayers.layers.forward_t(&input, train);
-        let mut r_dropout = input.chunk(3, -1);
+        //eprintln!("px generated");
+        /*eprintln!(
+            "Shape for decoder forward: {:?}",
+            self.px_r_scale_dropout_decoder.ws.size2()
+        );
+        */
+        //eprintln!("Shape for px forward: {:?}", px.size2());
+        let r_dropout = self.px_r_scale_dropout_decoder.forward_t(&px, train);
+        //eprintln!("dropout generated");
+        let mut r_dropout = r_dropout.chunk(3, -1);
         let px_scale = r_dropout.remove(2);
         let px_scale = if self.use_size_factor_key {
             px_scale.softmax(-1, Kind::Float)
         } else {
             px_scale.softplus()
         };
+        //eprintln!("Got px_scale of size {:?}", px_scale.size2());
         let dropout = r_dropout.remove(1);
-        let r = r_dropout.remove(0);
+        //eprintln!("Got dropout ");
+        let r = r_dropout.remove(0).exp();
+        //eprintln!("Got r");
         let px_rate = library_size.exp() * &px_scale;
-        return (px_scale, r, px_rate, dropout);
+        //eprintln!("Got px_rate");
+        return ZINB::new((px_scale, r, px_rate, dropout));
     }
-    pub fn create(vs: &nn::VarStore, fclayers: FCLayerSet, use_size_factor_key: bool) -> Self {
+    pub fn new(vs: &nn::VarStore, fclayers: FCLayerSet, data_dim: i64) -> Self {
+        Self::create(vs, fclayers, data_dim, false)
+    }
+    pub fn create(
+        vs: &nn::VarStore,
+        fclayers: FCLayerSet,
+        data_dim: i64,
+        use_size_factor_key: bool,
+    ) -> Self {
         /*
         let mut scale_decoder = nn::seq_t().add(nn::linear(
             vs.root(),
@@ -324,9 +444,15 @@ impl ZINBDecoder {
         let px_r_scale_dropout_decoder = nn::linear(
             vs.root(),
             fclayers.settings.d_hidden,
-            fclayers.settings.d_out * 3,
+            data_dim * 3,
             Default::default(),
         );
+        /*eprintln!(
+            "Decoder dims out: {} * 3 = {}",
+            data_dim,
+            data_dim * 3
+        );
+        */
         Self {
             fclayers,
             use_size_factor_key,

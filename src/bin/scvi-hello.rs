@@ -1,3 +1,4 @@
+use rust_scvi::nnutil;
 use rust_scvi::nnutil::*;
 use tch::{self, nn, nn::ModuleT, nn::OptimizerConfig, *};
 
@@ -6,12 +7,11 @@ const LABELS: i64 = 10;
 
 fn main() -> Result<(), TchError> {
     let mnist = vision::mnist::load_dir("data")?;
-    let device = tch::Device::cuda_if_available();
-    let vs = nn::VarStore::new(device);
+    let device = nnutil::best_device_available();
     println!("Hello, world!");
     let settings =
         FCLayerSetSettings::new_simple(IMAGE_DIM, 64, Some(LABELS), Some(3), Default::default());
-    let vs = nn::VarStore::new(Device::cuda_if_available());
+    let vs = nn::VarStore::new(device);
     let fclayers = FCLayerSet::new(&vs, settings);
     let net = &fclayers.layers;
     let mut opt = nn::Adam::default().build(&vs, 1e-4)?;
