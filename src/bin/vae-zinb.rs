@@ -72,26 +72,25 @@ fn main() -> Result<(), TchError> {
         .init();
     let data = load_data();
     println!("Hello, world!");
-    let latent_dim: i64 = 32;
+    let latent_dim = settings.latent_dim;
     let labels = &data["labels"];
     let data = &data["data"];
     let data_dim = data.size2()?.1;
     tch::manual_seed(settings.seed);
     let n_layers = settings.n_layers;
-    const HIDDEN_DIM: i64 = 64i64;
     log::info!("Set seed");
     let encoder_settings = FCLayerSetSettings::new_simple(
         data_dim,
         latent_dim,
-        Some(HIDDEN_DIM),
+        Some(settings.hidden_dim),
         Some(n_layers),
         Default::default(),
     );
     log::info!("Made settings for enc");
     let mut decoder_settings = FCLayerSetSettings::new_simple(
         latent_dim,
-        HIDDEN_DIM,
-        Some(HIDDEN_DIM),
+        settings.hidden_dim,
+        Some(settings.hidden_dim),
         Some(n_layers),
         Default::default(),
     );
@@ -131,7 +130,8 @@ fn main() -> Result<(), TchError> {
             .enumerate()
         {
             const TRAIN: bool = true;
-            total_samples += bdata.size2().unwrap().0 as i32;
+            let current_bs = bdata.size2().unwrap().0 as i32;
+            total_samples += current_bs;
             let bdata = bdata.to_kind(tch::Kind::Float).log1p();
             let latent = net.forward_t(&bdata, TRAIN);
             let (sampled_data, mu, logvar) = sample(&latent);
@@ -143,8 +143,10 @@ fn main() -> Result<(), TchError> {
             let recon_loss = -decoded.log_prob(&bdata).sum(tch::Kind::Float);
             let kl_loss: Tensor =
                 -0.5 * (1i64 + &logvar - mu.pow_tensor_scalar(2) - logvar.exp()).sum(Kind::Float);
-            rloss_sum += &recon_loss.double_value(&[]);
-            klloss_sum += &kl_loss.double_value(&[]);
+            let current_recon_loss: f64 = recon_loss.double_value(&[]);
+            let current_kl_loss: f64 = kl_loss.double_value(&[]);
+            rloss_sum += current_recon_loss;
+            klloss_sum += current_kl_loss;
             let loss = recon_loss + kl_loss * settings.kl_scale;
             opt.backward_step(&loss);
             if batch_index % settings.report_index as usize == 0 {
@@ -155,6 +157,13 @@ fn main() -> Result<(), TchError> {
                     rloss_sum / (total_samples as f64),
                     klloss_sum / (total_samples as f64),
                     (klloss_sum + rloss_sum) / (batch_index + 1) as f64,
+                );
+                log::info!(
+                    "epoch: {:4} after {num_processed} mean train error of this batch: recon {:5.2}, kl {:5.2}, total {:5.2}",
+                    epoch,
+                    current_recon_loss / (current_bs as f64),
+                    current_kl_loss / (current_bs as f64),
+                    (current_kl_loss + current_recon_loss) / (current_bs as f64),
                 );
             }
         }

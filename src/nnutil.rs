@@ -52,6 +52,9 @@ impl BroadcastingParameter {
             .get(index as usize)
             .unwrap_or(self.data.first().unwrap()))
     }
+    pub fn is_single_value(&self) -> bool {
+        self.data.len() == 1usize
+    }
     pub fn from_vec(vals: &Vec<f64>) -> Self {
         Self::from(vals)
     }
@@ -120,11 +123,9 @@ pub struct ActivationPlan {
 }
 impl std::default::Default for ActivationPlan {
     fn default() -> Self {
-        let activation = Activation::LeakyRelu;
-        let is_squared = false;
         Self {
-            activation,
-            is_squared,
+            activation: Activation::Mish,
+            is_squared: false,
         }
     }
 }
@@ -155,6 +156,94 @@ impl ActivationPlan {
         }
     }
 }
+#[derive(Debug, Clone)]
+pub enum FCLayerType {
+    Encode,
+    Decode,
+    Neither,
+}
+
+pub struct ZINBVAESettings {
+    pub d_in: i64,
+    pub d_latent: i64,
+    pub encoder_settings: FCLayerSetSettings,
+    pub decoder_settings: FCLayerSetSettings,
+    pub use_size_factor_key: bool,
+}
+
+impl ZINBVAESettings {
+    pub fn new(
+        d_in: i64,
+        d_hidden: i64,
+        n_layers: i64,
+        d_latent: i64,
+        dropout: Option<BroadcastingParameter>,
+        use_size_factor_key: Option<bool>,
+    ) -> Self {
+        let encoder_settings = FCLayerSetSettings::new_simple(
+            d_in,
+            d_latent,
+            Some(d_hidden),
+            Some(n_layers),
+            dropout.clone(),
+        );
+        let mut decoder_settings = FCLayerSetSettings::new_simple(
+            d_in,
+            d_latent,
+            Some(d_hidden),
+            Some(n_layers),
+            dropout.clone(),
+        );
+        decoder_settings.no_dropout();
+        Self {
+            d_in,
+            d_latent,
+            encoder_settings,
+            decoder_settings,
+            use_size_factor_key: use_size_factor_key.unwrap_or(false),
+        }
+    }
+}
+
+pub struct ZINBVAE {
+    settings: ZINBVAESettings,
+    encoder: FCLayerSet,
+    meanvar_encoder: tch::nn::Linear,
+    decoder: ZINBDecoder,
+    /*
+        let meanvar_encoder = nn::linear(
+            vs.root(),
+            encoder_settings.d_out,
+            latent_dim * 2i64,
+            Default::default(),
+        );
+    */
+}
+
+impl ZINBVAE {
+    pub fn new(vs: &nn::VarStore, settings: ZINBVAESettings) -> Self {
+        let encoder = FCLayerSet::new(vs, settings.encoder_settings.clone());
+        let decoder = ZINBDecoder::create(
+            vs,
+            FCLayerSet::new(vs, settings.decoder_settings.clone()),
+            settings.d_in,
+            settings.use_size_factor_key,
+        );
+        let meanvar_encoder = nn::linear(
+            vs.root() / "meanvar_encoder",
+            settings.d_latent,
+            settings.d_latent * 2i64,
+            Default::default(),
+        );
+        Self {
+            settings,
+            encoder,
+            decoder,
+            meanvar_encoder,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct FCLayerSetSettings {
     pub d_in: i64,
@@ -166,6 +255,7 @@ pub struct FCLayerSetSettings {
     pub batch_norm: Vec<bool>,
     pub layer_norm: Vec<bool>,
     pub activation: Vec<ActivationPlan>,
+    pub layer_type: FCLayerType,
 }
 
 impl FCLayerSetSettings {
@@ -184,16 +274,26 @@ impl FCLayerSetSettings {
     ) -> Self {
         let n_layers: usize = n_layers.unwrap_or(1) as usize;
         eprintln!("n layers: {n_layers}");
+        let dropout = dropout.unwrap_or(Self::default_dropout(Some(0.125)));
+        let layer_type = if dropout.data.iter().all(|x| *x == 0.) {
+            FCLayerType::Decode
+        } else {
+            FCLayerType::Encode
+        };
         Self {
             d_in,
             d_out,
             d_hidden: d_hidden.unwrap_or(128),
             n_layers: n_layers as i64,
-            dropout: dropout.unwrap_or(Self::default_dropout(Some(0.125))),
+            dropout,
             batch_norm: vec![false; n_layers],
             layer_norm: vec![true; n_layers],
             activation: vec![ActivationPlan::default(); n_layers],
+            layer_type,
         }
+    }
+    pub fn set_layer_type(&mut self, new_type: FCLayerType) {
+        self.layer_type = new_type;
     }
     pub fn make_layer(&self, vs: &nn::VarStore, layer_index: i64) -> SequentialT {
         let mut ret = nn::seq_t();
@@ -208,9 +308,13 @@ impl FCLayerSetSettings {
             self.d_hidden
         };
         eprintln!("Layer {layer_index} in layer has {in_dim} in and {out_dim} out");
+        let layer_type_str: &'static str = match self.layer_type {
+            FCLayerType::Encode => "encode",
+            FCLayerType::Decode => "decode",
+            FCLayerType::Neither => "unknown",
+        };
         ret = ret.add(nn::linear(
-            // *vs / format!("fclayer{in_dim}:{out_dim}:{layer_index}:linear"),
-            vs.root(),
+            vs.root() / format!("fclayer{in_dim}:{out_dim}:{layer_index}:{layer_type_str}:linear"),
             in_dim,
             out_dim,
             Default::default(),
@@ -222,14 +326,16 @@ impl FCLayerSetSettings {
                 ..Default::default()
             };
             ret = ret.add(nn::batch_norm1d(
-                vs.root() / format!("fclayer{in_dim}:{out_dim}:{layer_index}:batchnorm"),
+                vs.root()
+                    / format!("fclayer{in_dim}:{out_dim}:{layer_index}:{layer_type_str}:batchnorm"),
                 out_dim,
                 config,
             ));
         }
         if self.layer_norm[layer_index as usize] {
             let layer_norm = nn::layer_norm(
-                vs.root() / format!("layer_norm{layer_index}"),
+                vs.root()
+                    / format!("fclayer{in_dim}:{out_dim}:{layer_index}:{layer_type_str}:layernorm"),
                 vec![out_dim],
                 Default::default(),
             );
@@ -255,7 +361,7 @@ impl FCLayerSet {
     pub fn new(vs: &nn::VarStore, settings: FCLayerSetSettings) -> Self {
         let mut layers = nn::seq_t();
         for layer_index in 0..settings.n_layers {
-            eprintln!("making layer {layer_index}");
+            log::debug!("making layer {layer_index}");
             layers = layers.add(settings.make_layer(vs, layer_index));
         }
         Self { settings, layers }
@@ -366,16 +472,6 @@ impl ZINB {
         //eprintln!("Made pi theta and log mu");
 
         let case_zero = (pi_theta_log).softplus() - &softplus_pi;
-        //eprintln!("case_zero_shape: {:?}", case_zero.size2());
-        //eprintln!("Shape of softplus_pi:{softplus_pi}");
-        //eprintln!("Shape of pi_theta_log:{pi_theta_log}");
-        //eprintln!("Shape of log_mu_eps:{log_mu_eps}");
-        /*eprintln!(
-            "Shape of log_theta_mu_eps:{log_theta_mu_eps},{:?}",
-            log_theta_mu_eps.size2()
-        );
-        */
-        //eprintln!("Shape of x:{x},{:?}", x.size2());
         let case_non_zero = -softplus_pi
             + pi_theta_log
             + x * (log_mu_eps - log_theta_mu_eps)
@@ -435,35 +531,12 @@ impl ZINBDecoder {
         data_dim: i64,
         use_size_factor_key: bool,
     ) -> Self {
-        /*
-        let mut scale_decoder = nn::seq_t().add(nn::linear(
-            vs.root(),
-            self.fclayers.settings.d_hidden,
-            self.fclayers.settings.d_out,
-            Default::default(),
-        ));
-        if !self.use_size_factor_key {
-        scale_decoder = scale_decoder.add_fn(|xs, t| {
-            xs.softmax(-1, Kind::Float);
-        });
-        } else {
-        scale_decoder = scale_decoder.add_fn(|xs| {
-            xs.softplus();
-        });
-        }
-        */
         let px_r_scale_dropout_decoder = nn::linear(
-            vs.root(),
+            vs.root() / "px_r_scale_dropout_decoder",
             fclayers.settings.d_hidden,
             data_dim * 3,
             Default::default(),
         );
-        /*eprintln!(
-            "Decoder dims out: {} * 3 = {}",
-            data_dim,
-            data_dim * 3
-        );
-        */
         Self {
             fclayers,
             use_size_factor_key,
