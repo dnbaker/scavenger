@@ -1,5 +1,7 @@
+use itertools::Itertools;
 use tch::{
-    nn, nn::BatchNormConfig, nn::Module, nn::ModuleT, nn::SequentialT, Device, Kind, Tensor,
+    nn, nn::BatchNormConfig, nn::Module, nn::ModuleT, nn::SequentialT, Device, IndexOp, Kind,
+    Tensor,
 };
 
 pub const VAR_EPS: f64 = 1e-5;
@@ -287,13 +289,42 @@ impl ZINBVAE {
         .iter()
         .map(|x| x.size())
         .collect::<Vec<_>>();
-        log::info!("Sizes: {sizes:?}");
+        log::debug!("Sizes: {sizes:?}");
         // latent     gen        mu       logvar    kl_loss   nb_recon_loss
         // [[16, 48], [16, 48], [16, 48], [16, 48], [16, 48], [16, 32738]]
         ((latent, gen, mu, logvar), (kl_loss, nb_recon_loss), decoded)
     }
     pub fn sample(&self, input: &Tensor) -> (Tensor, Tensor, Tensor) {
         sample_latent_gaussian(input)
+    }
+    pub fn num_data_chunks(&self) -> i64 {
+        5
+    }
+    pub fn num_latent_chunks(&self) -> i64 {
+        5
+    }
+    pub fn unpack_output(
+        &self,
+        input: &Tensor,
+    ) -> ((Tensor, Tensor, Tensor, Tensor), (Tensor, Tensor), ZINB) {
+        let latent_space_dim = self.settings.d_latent * self.num_latent_chunks();
+        // latent (0), gen (1), mu (2), logvar (3), kl_loss (4)
+        let latent_space_items = input.i((.., ..latent_space_dim));
+        let latent_space_items = latent_space_items.chunk(self.num_latent_chunks(), -1);
+        let (latent, gen, mu, logvar, kl_loss) =
+            latent_space_items.into_iter().collect_tuple().unwrap();
+
+        let data_space_items = input.i((.., latent_space_dim..));
+        let data_space_items = data_space_items.chunk(self.num_data_chunks(), -1);
+        let (nb_recon_loss, decoded_mu, decoded_theta, decoded_zi_logits, decoded_scale) =
+            data_space_items.into_iter().collect_tuple().unwrap();
+        let zinb = ZINB {
+            mu: decoded_mu,
+            theta: decoded_theta,
+            zi_logits: decoded_zi_logits,
+            scale: decoded_scale,
+        };
+        ((latent, gen, mu, logvar), (kl_loss, nb_recon_loss), zinb)
     }
 }
 
