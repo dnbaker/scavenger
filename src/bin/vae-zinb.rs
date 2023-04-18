@@ -53,7 +53,7 @@ struct Settings {
     pub kl_scale: f64,
 
     #[clap(long, short)]
-    #[clap(default_value = "true")]
+    #[clap(default_value = "false")]
     pub add_classifier_loss: bool,
 
     #[clap(long)]
@@ -152,7 +152,7 @@ fn main() -> Result<(), TchError> {
                     rloss_sum / (total_samples as f64),
                     klloss_sum / (total_samples as f64),
                     class_loss_sum / (total_samples as f64),
-                    (klloss_sum + rloss_sum) / (batch_index + 1) as f64,
+                    (klloss_sum + rloss_sum + class_loss_sum) / (batch_index + 1) as f64,
                 );
                 log::info!(
                     "epoch: {:4} after {num_processed} mean train error of this batch: recon {:5.2}, kl {:5.2}, classification {:5.2} total {:5.2}",
@@ -160,7 +160,7 @@ fn main() -> Result<(), TchError> {
                     current_recon_loss / (current_bs as f64),
                     current_kl_loss / (current_bs as f64),
                     current_class_loss / (current_bs as f64),
-                    (current_kl_loss + current_recon_loss) / (current_bs as f64),
+                    (current_kl_loss + current_recon_loss + current_class_loss) / (current_bs as f64),
                 );
             }
         }
