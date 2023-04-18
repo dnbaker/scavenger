@@ -18,7 +18,7 @@ struct Settings {
     pub num_epochs: i32,
 
     #[clap(long, short)]
-    #[clap(default_value = "1")]
+    #[clap(default_value = "16")]
     pub batch_size: i64,
 
     #[clap(long)]

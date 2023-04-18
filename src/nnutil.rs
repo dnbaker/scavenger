@@ -163,6 +163,7 @@ pub enum FCLayerType {
     Neither,
 }
 
+#[derive(Debug)]
 pub struct ZINBVAESettings {
     pub d_in: i64,
     pub d_latent: i64,
@@ -187,8 +188,13 @@ impl ZINBVAESettings {
             Some(n_layers),
             dropout.clone(),
         );
-        let mut decoder_settings =
-            FCLayerSetSettings::new_simple(d_in, d_latent, Some(d_hidden), Some(n_layers), dropout);
+        let mut decoder_settings = FCLayerSetSettings::new_simple(
+            d_latent,
+            d_hidden,
+            Some(d_hidden),
+            Some(n_layers),
+            dropout,
+        );
         decoder_settings.no_dropout();
         Self {
             d_in,
@@ -200,6 +206,7 @@ impl ZINBVAESettings {
     }
 }
 
+#[derive(Debug)]
 pub struct ZINBVAE {
     pub settings: ZINBVAESettings,
     encoder: FCLayerSet,
@@ -258,29 +265,56 @@ impl ZINBVAE {
             .sum_dim_intlist(Some([1].as_slice()), false, input.kind())
             .log()
             .unsqueeze(1i64);
-        log::info!("library_size: {library_size}");
-        log::info!("gen size: {:?}", gen.size());
+        log::debug!("library_size: {library_size}");
+        log::debug!("gen size: {:?}", gen.size());
         let decoded = self.decoder.decode(&gen, library_size, train);
         let kl_loss = -0.5 * (1i64 + &logvar - mu.pow_tensor_scalar(2) - logvar.exp());
         let nb_recon_loss = -decoded.log_prob(input);
         let sizes = [
             &latent,
-            &meanvar,
+            // &meanvar,
             &gen,
             &mu,
             &logvar,
             // &decoded,
             &kl_loss,
             &nb_recon_loss,
+            &decoded.mu,
+            &decoded.theta,
+            &decoded.zi_logits,
+            &decoded.scale,
         ]
         .iter()
         .map(|x| x.size())
         .collect::<Vec<_>>();
         log::info!("Sizes: {sizes:?}");
+        // latent     gen        mu       logvar    kl_loss   nb_recon_loss
+        // [[16, 48], [16, 48], [16, 48], [16, 48], [16, 48], [16, 32738]]
         ((latent, gen, mu, logvar), (kl_loss, nb_recon_loss), decoded)
     }
     pub fn sample(&self, input: &Tensor) -> (Tensor, Tensor, Tensor) {
         sample_latent_gaussian(input)
+    }
+}
+
+impl tch::nn::ModuleT for ZINBVAE {
+    fn forward_t(&self, xs: &Tensor, train: bool) -> Tensor {
+        let ((latent, gen, mu, logvar), (kl_loss, nb_recon_loss), decoded) = self.run(xs, train);
+        Tensor::cat(
+            &[
+                latent,
+                gen,
+                mu,
+                logvar,
+                kl_loss,
+                nb_recon_loss,
+                decoded.mu,
+                decoded.theta,
+                decoded.zi_logits,
+                decoded.scale,
+            ],
+            1i64,
+        )
     }
 }
 
@@ -425,6 +459,7 @@ pub fn best_device_available() -> Device {
     }
 }
 
+#[derive(Debug)]
 pub struct ZINBDecoder {
     // Important: make sure there's no dropout here.
     pub fclayers: FCLayerSet,
@@ -471,10 +506,10 @@ pub struct ZINBDecoder {
 */
 
 pub struct ZINB {
-    mu: Tensor,
-    theta: Tensor,
-    zi_logits: Tensor,
-    scale: Tensor,
+    pub mu: Tensor,
+    pub theta: Tensor,
+    pub zi_logits: Tensor,
+    pub scale: Tensor,
 }
 
 impl ZINB {
@@ -544,14 +579,15 @@ impl ZINBDecoder {
     }
     pub fn decode(&self, input: &tch::Tensor, library_size: &tch::Tensor, train: bool) -> ZINB {
         let px = self.fclayers.layers.forward_t(&input, train);
-        log::info!("px generated");
-        log::info!(
+        log::debug!("px generated. px shape: {:?}", px.size());
+        log::debug!("input shape: {:?}", input.size());
+        log::debug!(
             "Shape for decoder forward: {:?}",
-            self.px_r_scale_dropout_decoder.ws.size2()
+            self.px_r_scale_dropout_decoder.ws.size()
         );
-        log::info!("Shape for px forward: {:?}", px.size2());
+        log::debug!("Shape for px forward: {:?}", px.size2());
         let r_dropout = self.px_r_scale_dropout_decoder.forward_t(&px, train);
-        log::info!("dropout generated");
+        log::debug!("dropout generated");
         let mut r_dropout = r_dropout.chunk(3, -1);
         let px_scale = r_dropout.remove(2);
         let px_scale = if self.use_size_factor_key {
@@ -559,11 +595,11 @@ impl ZINBDecoder {
         } else {
             px_scale.softplus()
         };
-        log::info!("Got px_scale of size {:?}", px_scale.size2());
+        log::debug!("Got px_scale of size {:?}", px_scale.size2());
         let dropout = r_dropout.remove(1);
-        log::info!("Got dropout ");
+        log::debug!("Got dropout ");
         let r = r_dropout.remove(0).exp();
-        log::info!("Got r");
+        log::debug!("Got r");
         let px_rate = library_size.exp() * &px_scale;
         //eprintln!("Got px_rate");
         ZINB::new((px_scale, r, px_rate, dropout))
