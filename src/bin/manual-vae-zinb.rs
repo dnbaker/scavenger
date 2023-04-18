@@ -9,6 +9,7 @@ fn load_data() -> HashMap<String, Tensor> {
     let tensors = tch::Tensor::read_npz(source).unwrap();
     tensors.into_iter().collect::<HashMap<String, Tensor>>()
 }
+const VAR_EPS: f64 = 1e-4;
 
 #[derive(Parser)]
 #[clap(author, version, about)]
@@ -45,10 +46,6 @@ struct Settings {
     pub seed: i64,
 
     #[clap(long, short)]
-    #[clap(default_value = "0.1")]
-    pub dropout: f64,
-
-    #[clap(long, short)]
     #[clap(default_value = "10.")]
     pub kl_scale: f64,
 
@@ -82,28 +79,47 @@ fn main() -> Result<(), TchError> {
     tch::manual_seed(settings.seed);
     let n_layers = settings.n_layers;
     log::info!("Set seed");
-    let zinb_settings = ZINBVAESettings::new(
+    let encoder_settings = FCLayerSetSettings::new_simple(
         data_dim,
-        settings.hidden_dim,
-        n_layers,
         latent_dim,
-        Some(BroadcastingParameter::from(settings.dropout)),
+        Some(settings.hidden_dim),
+        Some(n_layers),
         Default::default(),
     );
+    log::info!("Made settings for enc");
+    let mut decoder_settings = FCLayerSetSettings::new_simple(
+        latent_dim,
+        settings.hidden_dim,
+        Some(settings.hidden_dim),
+        Some(n_layers),
+        Default::default(),
+    );
+    decoder_settings.no_dropout();
+    log::info!("Created: enc/dec settings");
     let vs = nn::VarStore::new(best_device_available());
     log::info!("Created: varstore");
-    let vae = ZINBVAE::new(&vs, zinb_settings);
+    let meanvar_encoder = nn::linear(
+        vs.root(),
+        encoder_settings.d_out,
+        latent_dim * 2i64,
+        Default::default(),
+    );
     eprintln!("Device: {:?}", vs.device());
+    let fclayers = FCLayerSet::new(&vs, encoder_settings);
+    let zinb_decoder = ZINBDecoder::new(&vs, FCLayerSet::new(&vs, decoder_settings), data_dim);
+    let mut net = nn::seq_t();
     if settings.log1p {
-        panic!("log1p not supported for this case because lazy");
+        net = net.add_fn(|xs| xs.log1p());
     }
+    net = net.add(fclayers.layers).add(meanvar_encoder);
     let batch_size = settings.batch_size;
     let num_rows = data.size2()?.0;
     let num_cols = data.size2()?.1;
     eprintln!("Dataset of size {num_rows}/{num_cols}");
     let mut opt = nn::Adam::default().build(&vs, 1e-4)?;
+    println!("Net built");
     for epoch in 0..settings.num_epochs {
-        log::info!("Epoch {epoch}");
+        println!("Epoch {epoch}");
         let mut rloss_sum = 0.;
         let mut klloss_sum = 0.;
         let mut total_samples = 0;
@@ -117,10 +133,16 @@ fn main() -> Result<(), TchError> {
             let current_bs = bdata.size2().unwrap().0 as i32;
             total_samples += current_bs;
             let bdata = bdata.to_kind(tch::Kind::Float).log1p();
-            let (latent_data, losses, zinb_model) = vae.run(&bdata, true);
-            let (kl, recon) = losses;
-            let recon_loss = recon.sum(tch::Kind::Float);
-            let kl_loss: Tensor = kl.sum(Kind::Float);
+            let latent = net.forward_t(&bdata, TRAIN);
+            let (sampled_data, mu, logvar) = sample(&latent);
+            let library_size = &bdata
+                .sum_dim_intlist(Some([1].as_slice()), false, bdata.kind())
+                .log()
+                .unsqueeze(1i64);
+            let decoded = zinb_decoder.decode(&sampled_data, library_size, TRAIN);
+            let recon_loss = -decoded.log_prob(&bdata).sum(tch::Kind::Float);
+            let kl_loss: Tensor =
+                -0.5 * (1i64 + &logvar - mu.pow_tensor_scalar(2) - logvar.exp()).sum(Kind::Float);
             let current_recon_loss: f64 = recon_loss.double_value(&[]);
             let current_kl_loss: f64 = kl_loss.double_value(&[]);
             rloss_sum += current_recon_loss;
