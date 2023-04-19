@@ -1,11 +1,10 @@
 use clap::Parser;
 use rust_scvi::iter::Iter;
-use rust_scvi::nnutil::*;
+use rust_scvi::nnutil::{self, *};
 use std::collections::{BTreeSet, HashMap};
 use tch::{self, nn, nn::ModuleT, nn::OptimizerConfig, *};
 
-fn load_data() -> HashMap<String, Tensor> {
-    let source = "/Users/dnb13/Desktop/code/compressed_bundle/PBMC/pbmc.sparse.npz";
+fn load_data(source: std::path::PathBuf) -> HashMap<String, Tensor> {
     let tensors = tch::Tensor::read_npz(source).unwrap();
     tensors.into_iter().collect::<HashMap<String, Tensor>>()
 }
@@ -62,6 +61,8 @@ struct Settings {
 
     #[clap(long)]
     pub log1p: bool,
+
+    pub data_path: Option<String>,
 }
 
 fn main() -> Result<(), TchError> {
@@ -69,13 +70,51 @@ fn main() -> Result<(), TchError> {
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
         .init();
-    let data = load_data();
-    println!("Hello, world!");
+    let data_path = settings.data_path.unwrap_or(String::from(
+        "/Users/dnb13/Desktop/code/compressed_bundle/PBMC/pbmc.sparse.npz",
+    ));
+    let data = load_data(std::path::PathBuf::from(&data_path[..]));
     let latent_dim = settings.latent_dim;
-    let labels = &data["labels"];
-    let label_iter = labels.iter::<i64>().unwrap();
-    let num_labels = label_iter.collect::<BTreeSet<_>>().len() as i64;
-    let data = &data["data"];
+    let labels = data.get("labels");
+    let num_labels = labels
+        .map(|x| x.iter::<i64>().unwrap().collect::<BTreeSet<_>>().len() as i64)
+        .unwrap_or(0i64);
+    let device = nnutil::best_device_available();
+    let vs = nn::VarStore::new(device);
+    let mut csr_data: Option<Tensor> = None;
+    let (data, is_sparse) = match data.get("indptr") {
+        Some(indptr) => {
+            /*
+            crow_indices: &Tensor,
+            col_indices: &Tensor,
+            values: &Tensor,
+            size: &[i64],
+            options: (Kind, Device),
+            */
+            let col_indices = &data["indices"]; // feature indices, e.g., genes or transcripts
+            log::info!("col indices: {:?}", col_indices);
+            let indptr: Vec<i64> = Vec::<i64>::from(indptr);
+            let mut data_indices: Vec<i64> = vec![0i64; col_indices.numel() as usize];
+            log::info!("data indices: {}", data_indices.len());
+            indptr.windows(2).enumerate().for_each(|(idx, slice)| {
+                let from = slice[0] as usize;
+                let to = slice[1] as usize;
+                data_indices[from..to].fill(idx as i64);
+            });
+            let data_indices = Tensor::of_slice(data_indices.as_slice());
+            let shape = &data["shape"];
+            let data = &data["data"];
+            csr_data = Some(tch::Tensor::sparse_csr_tensor_crow_col_value_size(
+                &data_indices,
+                col_indices,
+                /*values=*/ data,
+                &shape.iter::<i64>().unwrap().collect::<Vec<i64>>()[..],
+                (data.kind(), device),
+            ));
+            (csr_data.as_ref().unwrap(), true)
+        }
+        None => (&data["data"], false),
+    };
     let data_dim = data.size2()?.1;
     tch::manual_seed(settings.seed);
     let n_layers = settings.n_layers;
@@ -89,7 +128,6 @@ fn main() -> Result<(), TchError> {
         Default::default(),
         Some(settings.zero_inflate),
     );
-    let vs = nn::VarStore::new(best_device_available());
     log::info!("Created: varstore");
     let vae = ZINBVAE::new(&vs, zinb_settings);
     eprintln!("Device: {:?}", vs.device());
@@ -113,15 +151,19 @@ fn main() -> Result<(), TchError> {
         let mut klloss_sum = 0.;
         let mut class_loss_sum = 0.;
         let mut total_samples = 0;
-        // let varsum = Tensor::zeros(&[latent_dim]);
-        for (batch_index, (bdata, blabels)) in Iter::new(data, Some(labels), batch_size)
-            .shuffle()
+        for (batch_index, (bdata, blabels)) in Iter::new(data, labels, batch_size)
+            .shuffle_sparse(is_sparse)
             .to_device(vs.device())
             .enumerate()
         {
+            let bdata = if is_sparse {
+                bdata.to_dense(tch::Kind::Float)
+            } else {
+                bdata
+            };
             let current_bs = bdata.size2().unwrap().0 as i32;
             total_samples += current_bs;
-            let bdata = bdata.to_kind(tch::Kind::Float).log1p();
+            // let bdata = bdata.to_kind(tch::Kind::Float).log1p();
             let data_output = vae.forward_t(&bdata, true);
             let (latent_data, losses, _zinb_model) = vae.unpack_output(&data_output);
             let (kl, recon) = losses;
@@ -173,7 +215,7 @@ fn main() -> Result<(), TchError> {
         println!("epoch: {:4} train error: {:5.2}", epoch, loss_sum);
     }
     vs.save(format!(
-        "vae-pbmc.epochs.{}.hid.{}.latent.{}.nlayers.{}.seed.{}.ot",
+        "weights/vae-pbmc.epochs.{}.hid.{}.latent.{}.nlayers.{}.seed.{}.ot",
         settings.num_epochs,
         settings.hidden_dim,
         settings.latent_dim,

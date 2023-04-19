@@ -68,6 +68,12 @@ impl Iter {
     ///
     /// The iterator would still run over the whole dataset but the order in
     /// which elements are grouped in mini-batches is randomized.
+    pub fn shuffle_sparse(&mut self, sparse: bool) -> &mut Iter {
+        if !sparse {
+            self.shuffle();
+        }
+        self
+    }
     pub fn shuffle(&mut self) -> &mut Iter {
         let index = Tensor::randperm(self.total_size, (Kind::Int64, self.device));
         self.xs = self.xs.index_select(0, &index);
