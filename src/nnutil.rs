@@ -172,6 +172,7 @@ pub struct ZINBVAESettings {
     pub encoder_settings: FCLayerSetSettings,
     pub decoder_settings: FCLayerSetSettings,
     pub use_size_factor_key: bool,
+    pub zero_inflate: bool,
 }
 
 impl ZINBVAESettings {
@@ -182,6 +183,7 @@ impl ZINBVAESettings {
         d_latent: i64,
         dropout: Option<BroadcastingParameter>,
         use_size_factor_key: Option<bool>,
+        zero_inflate: Option<bool>,
     ) -> Self {
         let encoder_settings = FCLayerSetSettings::new_simple(
             d_in,
@@ -198,12 +200,14 @@ impl ZINBVAESettings {
             dropout,
         );
         decoder_settings.no_dropout();
+        let zero_inflate = zero_inflate.unwrap_or(true);
         Self {
             d_in,
             d_latent,
             encoder_settings,
             decoder_settings,
             use_size_factor_key: use_size_factor_key.unwrap_or(false),
+            zero_inflate,
         }
     }
 }
@@ -234,6 +238,9 @@ pub fn sample_latent_gaussian(input: &Tensor) -> (Tensor, Tensor, Tensor) {
 }
 
 impl ZINBVAE {
+    pub fn zero_inflate(&self) -> bool {
+        self.settings.zero_inflate
+    }
     pub fn new(vs: &nn::VarStore, settings: ZINBVAESettings) -> Self {
         let encoder = FCLayerSet::new(vs, settings.encoder_settings.clone());
         let decoder = ZINBDecoder::create(
@@ -241,6 +248,7 @@ impl ZINBVAE {
             FCLayerSet::new(vs, settings.decoder_settings.clone()),
             settings.d_in,
             settings.use_size_factor_key,
+            settings.zero_inflate,
         );
         let meanvar_encoder = nn::linear(
             vs.root() / "meanvar_encoder",
@@ -298,7 +306,7 @@ impl ZINBVAE {
         sample_latent_gaussian(input)
     }
     pub fn num_data_chunks(&self) -> i64 {
-        5
+        4i64 + (self.zero_inflate() as i64)
     }
     pub fn num_latent_chunks(&self) -> i64 {
         5
@@ -315,14 +323,27 @@ impl ZINBVAE {
             latent_space_items.into_iter().collect_tuple().unwrap();
 
         let data_space_items = input.i((.., latent_space_dim..));
-        let data_space_items = data_space_items.chunk(self.num_data_chunks(), -1);
-        let (nb_recon_loss, decoded_mu, decoded_theta, decoded_zi_logits, decoded_scale) =
+        let mut data_space_items = data_space_items
+            .chunk(self.num_data_chunks(), -1)
+            .into_iter();
+        let nb_recon_loss = data_space_items.next().unwrap();
+        let decoded_mu = data_space_items.next().unwrap();
+        let decoded_theta = data_space_items.next().unwrap();
+        let scale = data_space_items.next().unwrap();
+        let zi_logits = if let Some(decoded_zi_logits) = data_space_items.next() {
+            decoded_zi_logits
+        } else {
+            Tensor::zeros(&[] as &[i64], (scale.kind(), scale.device()))
+        };
+        /*
+        let (nb_recon_loss, decoded_mu, decoded_theta, decoded_zi_logits, scale) =
             data_space_items.into_iter().collect_tuple().unwrap();
+        */
         let zinb = ZINB {
             mu: decoded_mu,
             theta: decoded_theta,
-            zi_logits: decoded_zi_logits,
-            scale: decoded_scale,
+            zi_logits,
+            scale,
         };
         ((latent, gen, mu, logvar), (kl_loss, nb_recon_loss), zinb)
     }
@@ -331,21 +352,21 @@ impl ZINBVAE {
 impl tch::nn::ModuleT for ZINBVAE {
     fn forward_t(&self, xs: &Tensor, train: bool) -> Tensor {
         let ((latent, gen, mu, logvar), (kl_loss, nb_recon_loss), decoded) = self.run(xs, train);
-        Tensor::cat(
-            &[
-                latent,
-                gen,
-                mu,
-                logvar,
-                kl_loss,
-                nb_recon_loss,
-                decoded.mu,
-                decoded.theta,
-                decoded.zi_logits,
-                decoded.scale,
-            ],
-            1i64,
-        )
+        let mut cat_inputs: Vec<Tensor> = vec![
+            latent,
+            gen,
+            mu,
+            logvar,
+            kl_loss,
+            nb_recon_loss,
+            decoded.mu,
+            decoded.theta,
+            decoded.scale,
+        ];
+        if self.zero_inflate() {
+            cat_inputs.push(decoded.zi_logits);
+        }
+        Tensor::cat(&cat_inputs[..], 1i64)
     }
 }
 
@@ -496,6 +517,7 @@ pub struct ZINBDecoder {
     pub fclayers: FCLayerSet,
     pub px_r_scale_dropout_decoder: tch::nn::Linear, // This layer emits x and r, and dropout. We then chunk it to extract x, r and dropout separately.
     use_size_factor_key: bool,
+    zero_inflate: bool,
 }
 
 // For parsing from CSR
@@ -568,7 +590,21 @@ impl ZINB {
         &self.mu
     }
     pub fn log_prob(&self, x: &Tensor) -> tch::Tensor {
-        self.log_likelihood(x)
+        if self.zi_logits.size() == self.theta.size() {
+            self.log_likelihood(x)
+        } else {
+            self.log_likelihood_nb(x)
+        }
+    }
+    pub fn log_likelihood_nb(&self, x: &Tensor) -> Tensor {
+        let log_theta_mu_eps = (&self.theta + &self.mu + VAR_EPS).log();
+        let log_mu_eps = (&self.mu + VAR_EPS).log();
+        let ret = &self.theta * ((&self.theta + VAR_EPS).log() - &log_theta_mu_eps)
+            + x * (log_mu_eps - log_theta_mu_eps)
+            + (x + &self.theta).lgamma()
+            - &self.theta.lgamma()
+            - (x + 1).lgamma();
+        ret
     }
     pub fn log_likelihood(&self, x: &Tensor) -> tch::Tensor {
         // eprintln!("Started");
@@ -619,41 +655,51 @@ impl ZINBDecoder {
         log::debug!("Shape for px forward: {:?}", px.size2());
         let r_dropout = self.px_r_scale_dropout_decoder.forward_t(&px, train);
         log::debug!("dropout generated");
-        let mut r_dropout = r_dropout.chunk(3, -1);
-        let px_scale = r_dropout.remove(2);
+        let mut r_dropout_chunked = r_dropout.chunk(self.dim_mul(), -1);
+        let dropout = if self.zero_inflate {
+            r_dropout_chunked.remove(2)
+        } else {
+            Tensor::zeros(&[] as &[i64], (r_dropout.kind(), r_dropout.device()))
+        };
+        let px_scale = r_dropout_chunked.remove(1);
         let px_scale = if self.use_size_factor_key {
             px_scale.softmax(-1, Kind::Float)
         } else {
             px_scale.softplus()
         };
-        log::debug!("Got px_scale of size {:?}", px_scale.size2());
-        let dropout = r_dropout.remove(1);
-        log::debug!("Got dropout ");
-        let r = r_dropout.remove(0).exp();
-        log::debug!("Got r");
+        let r = r_dropout_chunked.remove(0).exp();
         let px_rate = library_size.exp() * &px_scale;
-        //eprintln!("Got px_rate");
         ZINB::new((px_scale, r, px_rate, dropout))
     }
-    pub fn new(vs: &nn::VarStore, fclayers: FCLayerSet, data_dim: i64) -> Self {
-        Self::create(vs, fclayers, data_dim, false)
+    pub fn new(vs: &nn::VarStore, fclayers: FCLayerSet, data_dim: i64, zero_inflate: bool) -> Self {
+        Self::create(vs, fclayers, data_dim, false, zero_inflate)
+    }
+    pub fn dim_mul(&self) -> i64 {
+        if self.zero_inflate {
+            3i64
+        } else {
+            2i64
+        }
     }
     pub fn create(
         vs: &nn::VarStore,
         fclayers: FCLayerSet,
         data_dim: i64,
         use_size_factor_key: bool,
+        zero_inflate: bool,
     ) -> Self {
+        let data_dim_mul = if zero_inflate { 3i64 } else { 2i64 };
         let px_r_scale_dropout_decoder = nn::linear(
             vs.root() / "px_r_scale_dropout_decoder",
             fclayers.settings.d_hidden,
-            data_dim * 3,
+            data_dim * data_dim_mul,
             Default::default(),
         );
         Self {
             fclayers,
             use_size_factor_key,
             px_r_scale_dropout_decoder,
+            zero_inflate,
         }
     }
 }

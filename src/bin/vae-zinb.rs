@@ -56,6 +56,10 @@ struct Settings {
     #[clap(default_value = "false")]
     pub add_classifier_loss: bool,
 
+    #[clap(long, short)]
+    #[clap(default_value = "false")]
+    pub zero_inflate: bool,
+
     #[clap(long)]
     pub log1p: bool,
 }
@@ -83,6 +87,7 @@ fn main() -> Result<(), TchError> {
         latent_dim,
         Some(BroadcastingParameter::from(settings.dropout)),
         Default::default(),
+        Some(settings.zero_inflate),
     );
     let vs = nn::VarStore::new(best_device_available());
     log::info!("Created: varstore");
@@ -164,7 +169,7 @@ fn main() -> Result<(), TchError> {
                 );
             }
         }
-        let loss_sum = rloss_sum + klloss_sum;
+        let loss_sum = rloss_sum + klloss_sum + class_loss_sum;
         println!("epoch: {:4} train error: {:5.2}", epoch, loss_sum);
     }
     vs.save(format!(

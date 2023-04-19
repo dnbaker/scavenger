@@ -106,7 +106,8 @@ fn main() -> Result<(), TchError> {
     );
     eprintln!("Device: {:?}", vs.device());
     let fclayers = FCLayerSet::new(&vs, encoder_settings);
-    let zinb_decoder = ZINBDecoder::new(&vs, FCLayerSet::new(&vs, decoder_settings), data_dim);
+    let zinb_decoder =
+        ZINBDecoder::new(&vs, FCLayerSet::new(&vs, decoder_settings), data_dim, true);
     let mut net = nn::seq_t();
     if settings.log1p {
         net = net.add_fn(|xs| xs.log1p());
