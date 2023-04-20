@@ -143,10 +143,9 @@ impl CSRMatrix {
     pub fn extract_range(&self, range: Range<i64>) -> Tensor {
         let numrows = range.end - range.start;
         let indptr: Vec<i64> = Vec::<i64>::from(self.indptr.i(range.clone()));
+        /*
         let indptr_start = *indptr.first().unwrap();
         let indptr_stop = *indptr.last().unwrap();
-        let nnz = indptr_stop - indptr_start;
-        /*
         let mut data_indices: Vec<i64> = vec![0i64; nnz as usize];
         indptr.windows(2).enumerate().for_each(|(idx, slice)| {
             let from = (slice[0] - indptr_start) as usize;
