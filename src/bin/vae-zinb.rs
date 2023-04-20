@@ -1,5 +1,5 @@
 use clap::Parser;
-use rust_scvi::iter::Iter;
+use rust_scvi::iter::{CSRMatrix, Iter, IterCSR};
 use rust_scvi::nnutil::{self, *};
 use std::collections::{BTreeSet, HashMap};
 use tch::{self, nn, nn::ModuleT, nn::OptimizerConfig, *};
@@ -71,7 +71,7 @@ fn main() -> Result<(), TchError> {
         .filter_level(log::LevelFilter::Info)
         .init();
     let data_path = settings.data_path.unwrap_or(String::from(
-        "/Users/dnb13/Desktop/code/compressed_bundle/PBMC/pbmc.sparse.npz",
+        "/Users/dnb13/Desktop/code/compressed_bundle/PBMC/pbmc.csr.npz",
     ));
     let data = load_data(std::path::PathBuf::from(&data_path[..]));
     let latent_dim = settings.latent_dim;
@@ -81,41 +81,24 @@ fn main() -> Result<(), TchError> {
         .unwrap_or(0i64);
     let device = nnutil::best_device_available();
     let vs = nn::VarStore::new(device);
-    let mut csr_data: Option<Tensor> = None;
-    let (data, is_sparse) = match data.get("indptr") {
-        Some(indptr) => {
-            /*
-            crow_indices: &Tensor,
-            col_indices: &Tensor,
-            values: &Tensor,
-            size: &[i64],
-            options: (Kind, Device),
-            */
-            let col_indices = &data["indices"]; // feature indices, e.g., genes or transcripts
-            log::info!("col indices: {:?}", col_indices);
-            let indptr: Vec<i64> = Vec::<i64>::from(indptr);
-            let mut data_indices: Vec<i64> = vec![0i64; col_indices.numel() as usize];
-            log::info!("data indices: {}", data_indices.len());
-            indptr.windows(2).enumerate().for_each(|(idx, slice)| {
-                let from = slice[0] as usize;
-                let to = slice[1] as usize;
-                data_indices[from..to].fill(idx as i64);
-            });
-            let data_indices = Tensor::of_slice(data_indices.as_slice());
-            let shape = &data["shape"];
-            let data = &data["data"];
-            csr_data = Some(tch::Tensor::sparse_csr_tensor_crow_col_value_size(
-                &data_indices,
-                col_indices,
-                /*values=*/ data,
-                &shape.iter::<i64>().unwrap().collect::<Vec<i64>>()[..],
-                (data.kind(), device),
-            ));
-            (csr_data.as_ref().unwrap(), true)
-        }
-        None => (&data["data"], false),
+    let csr_data: Option<CSRMatrix> = match data.get("indptr") {
+        Some(indptr) => Some(CSRMatrix {
+            data: data["data"].shallow_clone().to_kind(Kind::Float),
+            indptr: indptr.shallow_clone(),
+            indices: data["indices"].shallow_clone(),
+            shape: Vec::<i64>::from(&data["shape"]),
+            kind: Kind::Float,
+        }),
+        None => None,
     };
-    let data_dim = data.size2()?.1;
+    if csr_data.is_none() {
+        panic!("Testing csr format");
+    }
+    let csr_data = csr_data.unwrap();
+    let shape = &csr_data.shape[..];
+    let num_rows = shape[0] as i64;
+    let num_cols = shape[1] as i64;
+    let data_dim = num_cols;
     tch::manual_seed(settings.seed);
     let n_layers = settings.n_layers;
     log::info!("Set seed");
@@ -135,15 +118,13 @@ fn main() -> Result<(), TchError> {
         panic!("log1p not supported for this case because lazy");
     }
     let batch_size = settings.batch_size;
-    let num_rows = data.size2()?.0;
-    let num_cols = data.size2()?.1;
     let classifier_layer = nn::linear(
         vs.root() / "classifier",
         latent_dim,
         num_labels,
         Default::default(),
     );
-    eprintln!("Dataset of size {num_rows}/{num_cols}");
+    eprintln!("Dataset of size {num_rows}/{data_dim}");
     let mut opt = nn::Adam::default().build(&vs, 1e-4)?;
     for epoch in 0..settings.num_epochs {
         log::info!("Epoch {epoch}");
@@ -151,16 +132,15 @@ fn main() -> Result<(), TchError> {
         let mut klloss_sum = 0.;
         let mut class_loss_sum = 0.;
         let mut total_samples = 0;
+        /*
         for (batch_index, (bdata, blabels)) in Iter::new(data, labels, batch_size)
             .shuffle_sparse(is_sparse)
+        */
+        log::info!("Requesting iteration");
+        for (batch_index, (bdata, blabels)) in IterCSR::new(&csr_data, labels, batch_size)
             .to_device(vs.device())
             .enumerate()
         {
-            let bdata = if is_sparse {
-                bdata.to_dense(tch::Kind::Float)
-            } else {
-                bdata
-            };
             let current_bs = bdata.size2().unwrap().0 as i32;
             total_samples += current_bs;
             // let bdata = bdata.to_kind(tch::Kind::Float).log1p();
