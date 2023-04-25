@@ -81,7 +81,6 @@ fn main() -> Result<(), TchError> {
         .unwrap_or(0i64);
     let device = nnutil::best_device_available();
     let vs = nn::VarStore::new(device);
-    let mut csr_data: Option<Tensor> = None;
     let (data, is_sparse) = (&data["data"], false);
     let data_dim = data.size2()?.1;
     tch::manual_seed(settings.seed);
@@ -191,5 +190,43 @@ fn main() -> Result<(), TchError> {
         settings.seed,
     ))
     .unwrap();
+    let mut closure = |input: &[Tensor]| vec![vae.forward_t(&input[0], false)];
+    let model = CModule::create_by_tracing(
+        "NBVAE",
+        "forward",
+        &[Tensor::zeros(&[data_dim], (Kind::Float, device))],
+        &mut closure,
+    )?;
+    model.save("nbvae.pt")?;
     Ok(())
 }
+
+/*
+fn main() -> Result<()> {
+    let m = tch::vision::mnist::load_dir("data")?;
+    let mut vs = nn::VarStore::new(Device::cuda_if_available());
+    let net = Net::new(&vs.root());
+    let mut opt = nn::Adam::default().build(&vs, 1e-4)?;
+    for epoch in 1..10 {
+        for (bimages, blabels) in m.train_iter(256).shuffle().to_device(vs.device()) {
+            let loss = net.forward_t(&bimages, true).cross_entropy_for_logits(&blabels);
+            opt.backward_step(&loss);
+        }
+        let test_accuracy =
+            net.batch_accuracy_for_logits(&m.test_images, &m.test_labels, vs.device(), 1024);
+        println!("epoch: {:4} test acc: {:5.2}%", epoch, 100. * test_accuracy,);
+    }
+
+    vs.freeze();
+    let mut closure = |input: &[Tensor]| vec![net.forward_t(&input[0], false)];
+    let model = CModule::create_by_tracing(
+        "MyModule",
+        "forward",
+        &[Tensor::zeros(&[784], FLOAT_CUDA)],
+        &mut closure,
+    )?;
+    model.save("model.pt")?;
+
+    Ok(())
+}
+*/

@@ -1,6 +1,5 @@
 use tch::{Device, IndexOp, Kind, TchError, Tensor};
 
-use std::iter::ExactSizeIterator;
 use std::ops::Range;
 
 /// An iterator over a pair of tensors which have the same first dimension
@@ -140,6 +139,36 @@ impl CSRMatrix {
             kind: self.kind,
         }
     }
+    pub fn extract_range_indexput(&self, range: Range<i64>) -> Tensor {
+        let numrows = range.end - range.start;
+        let indptr: Vec<i64> = Vec::<i64>::from(self.indptr.i(range.clone()));
+        let mut mat = Tensor::zeros(&[numrows, self.shape[1]], (self.kind, self.data.device()));
+        for (row_idx, slice) in indptr.windows(2).enumerate() {
+            log::debug!("row {} and slice {:?}", row_idx, slice);
+            let slice = (slice[0] as i64)..(slice[1] as i64);
+            let slice_len = slice.end - slice.start;
+            let xvals = self.data.new_full(
+                &[slice_len],
+                row_idx as i64,
+                (Kind::Int64, self.data.device()),
+            );
+            mat = mat.index_put_(
+                &[
+                    Some(xvals),
+                    Some(self.indices.i(slice.clone()).to_kind(Kind::Int)),
+                ],
+                &self.data.i(slice),
+                false,
+            );
+            /*
+            for (col_idx, data_val) in col_idx.zip(data_val) {
+                mat.index_put_(&[Some(row_idx as i64), Some(col_idx)], Tensor::from(data_val), false);
+                //mat.i((row_idx as i64, col_idx)) = data_val;
+            }
+            */
+        }
+        mat
+    }
     pub fn extract_range(&self, range: Range<i64>) -> Tensor {
         let numrows = range.end - range.start;
         let indptr: Vec<i64> = Vec::<i64>::from(self.indptr.i(range.clone()));
@@ -276,5 +305,27 @@ impl Iterator for IterCSR {
                     .map(|x| x.i(start..start + size).to_device(self.device)),
             ))
         }
+    }
+}
+
+pub mod tests {
+    use super::*;
+    #[test]
+    fn test_csr_index_put() {
+        const nnz: i64 = 25;
+        let indices = (0..25).collect::<Vec<i32>>();
+        let indptr = (0..6).map(|x| x * 5).collect::<Vec<i32>>();
+        let nrows = 5;
+        let ncols = 1000;
+        let csrmat = CSRMatrix {
+            data: tch::Tensor::randn(&[nnz], (Kind::Float, Device::Cpu)),
+            indices: tch::Tensor::of_slice(&indices[..]),
+            indptr: tch::Tensor::of_slice(&indptr[..]),
+            shape: vec![nrows, ncols],
+            kind: Kind::Float,
+        };
+        let ex = csrmat.extract_range(0..5);
+        let ex2 = csrmat.extract_range_indexput(0..5);
+        assert!(ex.isclose(&ex2, 1e-5, 1e-8, false));
     }
 }
