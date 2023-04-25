@@ -136,7 +136,6 @@ fn main() -> Result<(), TchError> {
         for (batch_index, (bdata, blabels)) in Iter::new(data, labels, batch_size)
             .shuffle_sparse(is_sparse)
         */
-        log::info!("Requesting iteration");
         for (batch_index, (bdata, blabels)) in IterCSR::new(&csr_data, labels, batch_size)
             .to_device(vs.device())
             .enumerate()

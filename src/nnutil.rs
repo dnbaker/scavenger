@@ -399,7 +399,6 @@ impl FCLayerSetSettings {
         dropout: Option<BroadcastingParameter>,
     ) -> Self {
         let n_layers: usize = n_layers.unwrap_or(1) as usize;
-        eprintln!("n layers: {n_layers}");
         let dropout = dropout.unwrap_or(Self::default_dropout(Some(0.125)));
         let layer_type = if dropout.data.iter().all(|x| *x == 0.) {
             FCLayerType::Decode
@@ -433,7 +432,6 @@ impl FCLayerSetSettings {
         } else {
             self.d_hidden
         };
-        eprintln!("Layer {layer_index} in layer has {in_dim} in and {out_dim} out");
         let layer_type_str: &'static str = match self.layer_type {
             FCLayerType::Encode => "encode",
             FCLayerType::Decode => "decode",
