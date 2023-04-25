@@ -126,7 +126,7 @@ fn main() -> Result<(), TchError> {
             let bdata = if is_sparse {
                 bdata.to_dense(tch::Kind::Float)
             } else {
-                bdata
+                bdata.to_kind(tch::Kind::Float)
             };
             let current_bs = bdata.size2().unwrap().0 as i32;
             total_samples += current_bs;
@@ -197,7 +197,14 @@ fn main() -> Result<(), TchError> {
         &[Tensor::zeros(&[data_dim], (Kind::Float, device))],
         &mut closure,
     )?;
-    model.save("nbvae.pt")?;
+    model.save(format!(
+        "nbvae.epochs{}.hid{}.latent{}.nlayers{}.seed{}.pt",
+        settings.num_epochs,
+        settings.hidden_dim,
+        settings.latent_dim,
+        settings.n_layers,
+        settings.seed,
+    ))?;
     Ok(())
 }
 
