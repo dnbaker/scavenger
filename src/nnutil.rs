@@ -1,11 +1,9 @@
 use itertools::Itertools;
-use tch::{
-    nn, nn::BatchNormConfig, nn::Module, nn::ModuleT, nn::SequentialT, Device, IndexOp, Kind,
-    Tensor,
-};
+use tch::{nn, nn::BatchNormConfig, nn::ModuleT, nn::SequentialT, Device, IndexOp, Kind, Tensor};
 
 pub const VAR_EPS: f64 = 1e-5;
 
+/*
 pub struct Vae {
     fc1: nn::Linear,
     fc21: nn::Linear,
@@ -41,6 +39,7 @@ impl Vae {
         (self.decode(&(&mu + eps * std)), mu, logvar)
     }
 }
+*/
 
 #[derive(Debug, Clone)]
 pub struct BroadcastingParameter {
@@ -241,6 +240,13 @@ impl ZINBVAE {
     pub fn zero_inflate(&self) -> bool {
         self.settings.zero_inflate
     }
+    fn zero_grad(&mut self) {
+        self.decoder.zero_grad();
+        self.meanvar_encoder.ws.zero_grad();
+        if let Some(ref mut bias) = &mut self.meanvar_encoder.bs {
+            bias.zero_grad();
+        }
+    }
     pub fn new(vs: &nn::VarStore, settings: ZINBVAESettings) -> Self {
         let encoder = FCLayerSet::new(vs, settings.encoder_settings.clone());
         let decoder = ZINBDecoder::create(
@@ -420,18 +426,51 @@ impl FCLayerSetSettings {
     pub fn set_layer_type(&mut self, new_type: FCLayerType) {
         self.layer_type = new_type;
     }
+    fn get_outdim_at_layer(&self, layer_index: i64) -> i64 {
+        if layer_index == self.n_layers - 1 {
+            return self.d_out;
+        }
+        if self.d_hidden > 0 {
+            return self.d_hidden;
+        }
+        panic!("d_hidden should be > 0");
+        /*
+        let num_intermediate_sizes = self.n_layers - 1; // One for input, one for output
+        let ratio = self.d_in as f64 / self.d_out as f64;
+        let mul_per_layer = ratio.powf(1f64 / (num_intermediate_sizes) as f64);
+        let mul_to_layer = mul_per_layer.powi(layer_index as i32);
+        log::info!("mul per layer: {mul_per_layer}. Ratio: {ratio}. Num layers: {}. um intermedate {}", self.n_layers, num_intermediate_sizes);
+        let layer_dim = (self.d_in as f64 / mul_to_layer).ceil() as i64;
+        layer_dim
+        */
+    }
+    fn get_indim_at_layer(&self, layer_index: i64) -> i64 {
+        if layer_index == 0 {
+            return self.d_in;
+        }
+        if self.d_hidden > 0 {
+            return self.d_hidden;
+        }
+        panic!("d_hidden should be > 0");
+        /*
+        let ratio = self.d_in as f64 / self.d_out as f64;
+        let mul_per_layer = ratio.powf(1f64 / (self.n_layers - 1i64) as f64);
+        let mul_to_layer = mul_per_layer.powi((layer_index - 1i64) as i32);
+        let layer_dim = (self.d_in as f64 / mul_to_layer).ceil() as i64;
+        layer_dim
+        */
+    }
+    //
+    // Layer 1: input -> h1
+    // Layer 2: h1 -> h2
+    // Layer 3: h2 -> h3
+    // Layer 4: h3 -> output
+    //
     pub fn make_layer(&self, vs: &nn::VarStore, layer_index: i64) -> SequentialT {
         let mut ret = nn::seq_t();
-        let in_dim = if layer_index == 0 {
-            self.d_in
-        } else {
-            self.d_hidden
-        };
-        let out_dim = if layer_index == self.n_layers - 1 {
-            self.d_out
-        } else {
-            self.d_hidden
-        };
+        let in_dim = self.get_indim_at_layer(layer_index);
+        let out_dim = self.get_outdim_at_layer(layer_index);
+        log::info!("in: {in_dim}. out: {out_dim} for layer {layer_index}");
         let layer_type_str: &'static str = match self.layer_type {
             FCLayerType::Encode => "encode",
             FCLayerType::Decode => "decode",
@@ -483,6 +522,9 @@ pub struct FCLayerSet {
 }
 
 impl FCLayerSet {
+    pub fn zero_grad(&mut self) {
+        // do nothing
+    }
     pub fn new(vs: &nn::VarStore, settings: FCLayerSetSettings) -> Self {
         let mut layers = nn::seq_t();
         for layer_index in 0..settings.n_layers {
@@ -641,6 +683,13 @@ impl ZINB {
 impl ZINBDecoder {
     pub fn hidden_dim(&self) -> i64 {
         self.fclayers.settings.d_hidden
+    }
+    pub fn zero_grad(&mut self) {
+        self.fclayers.zero_grad();
+        self.px_r_scale_dropout_decoder.ws.zero_grad();
+        if let Some(ref mut bias) = &mut self.px_r_scale_dropout_decoder.bs {
+            bias.zero_grad();
+        }
     }
     pub fn decode(&self, input: &tch::Tensor, library_size: &tch::Tensor, train: bool) -> ZINB {
         let px = self.fclayers.layers.forward_t(&input, train);

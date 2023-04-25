@@ -1,5 +1,5 @@
 use clap::Parser;
-use rust_scvi::iter::{CSRMatrix, Iter, IterCSR};
+use rust_scvi::iter::{CSRMatrix, IterCSR};
 use rust_scvi::nnutil::{self, *};
 use std::collections::{BTreeSet, HashMap};
 use tch::{self, nn, nn::ModuleT, nn::OptimizerConfig, *};
@@ -63,6 +63,10 @@ struct Settings {
     pub log1p: bool,
 
     pub data_path: Option<String>,
+
+    #[clap(long, short)]
+    #[clap(default_value = "false")]
+    pub early_termination: bool,
 }
 
 fn main() -> Result<(), TchError> {
@@ -80,7 +84,7 @@ fn main() -> Result<(), TchError> {
         .map(|x| x.iter::<i64>().unwrap().collect::<BTreeSet<_>>().len() as i64)
         .unwrap_or(0i64);
     let device = nnutil::best_device_available();
-    let vs = nn::VarStore::new(device);
+    let mut vs = nn::VarStore::new(device);
     let csr_data: Option<CSRMatrix> = match data.get("indptr") {
         Some(indptr) => Some(CSRMatrix {
             data: data["data"].shallow_clone().to_kind(Kind::Float),
@@ -189,6 +193,9 @@ fn main() -> Result<(), TchError> {
                     (current_kl_loss + current_recon_loss + current_class_loss) / (current_bs as f64),
                 );
             }
+            if settings.early_termination {
+                break;
+            }
         }
         let loss_sum = rloss_sum + klloss_sum + class_loss_sum;
         println!("epoch: {:4} train error: {:5.2}", epoch, loss_sum);
@@ -202,5 +209,22 @@ fn main() -> Result<(), TchError> {
         settings.seed,
     ))
     .unwrap();
+    vs.freeze();
+    let mut closure = |input: &[Tensor]| vec![vae.forward_t(&input[0], false)];
+    let model = CModule::create_by_tracing(
+        &format!("{}NBVAE", if settings.zero_inflate { "ZI" } else { "" })[..],
+        "forward",
+        &[Tensor::randn(&[16, data_dim], (Kind::Float, device))],
+        &mut closure,
+    )?;
+    model.save(format!(
+        "{}nbvae.epochs{}.hid{}.latent{}.nlayers{}.seed{}.pt",
+        if settings.zero_inflate { "zi" } else { "" },
+        settings.num_epochs,
+        settings.hidden_dim,
+        settings.latent_dim,
+        settings.n_layers,
+        settings.seed,
+    ))?;
     Ok(())
 }

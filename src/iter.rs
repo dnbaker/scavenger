@@ -309,7 +309,7 @@ impl Iterator for IterCSR {
 }
 
 pub mod tests {
-    use super::*;
+    use crate::iter::CSRMatrix;
     #[test]
     fn test_csr_index_put() {
         const nnz: i64 = 25;
