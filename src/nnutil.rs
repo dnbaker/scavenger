@@ -605,6 +605,33 @@ pub struct ZINB {
     pub scale: Tensor,
 }
 
+pub trait Mean {
+    fn mean(&self) -> Tensor;
+}
+pub trait Variance {
+    fn variance(&self) -> Tensor;
+}
+
+impl Variance for ZINB {
+    fn variance(&self) -> Tensor {
+        let mean = self.mean();
+        (&mean + (1. + &mean)) / &self.theta
+        // not strictly correct for the zero-inflated case,
+        // but I don't have math for it and it's probably not an issue
+    }
+}
+
+impl Mean for ZINB {
+    fn mean(&self) -> Tensor {
+        if self.zi_logits.numel() == 0 {
+            self.mu.shallow_clone()
+        } else {
+            let zi_probs = self.zi_logits.softmax(-1, self.zi_logits.kind());
+            &self.mu * zi_probs
+        }
+    }
+}
+
 impl ZINB {
     pub fn new(inputs: (Tensor, Tensor, Tensor, Tensor)) -> Self {
         Self {
@@ -614,6 +641,17 @@ impl ZINB {
             scale: inputs.0,     // scale
         }
     }
+
+    /*
+        @property
+        def mean(self):  # noqa: D102
+            return self.mu
+
+        @property
+        def variance(self):  # noqa: D102
+            return self.mean + (self.mean**2) / self.theta
+
+    */
     pub fn scale_v(&self) -> &Tensor {
         &self.scale
     }
