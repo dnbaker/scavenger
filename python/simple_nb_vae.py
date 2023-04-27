@@ -10,7 +10,7 @@ VAR_EPS = 1e-4
 
 
 class ULayerSet(nn.Module):
-    def __init__(self, data_dim, out_dim, hidden_dims=[-1, -1], batch_norm=False, layer_norm=True, dropout=0.1, momentum=0.01, eps=1e-3, activation=nn.Mish):
+    def __init__(self, data_dim, out_dim, hidden_dims=[-1, -1], batch_norm=False, layer_norm=True, dropout=0.1, momentum=0.01, eps=1e-3, activation=nn.Mish, skip_last_activation=False):
         super().__init__()
         print(data_dim, out_dim, "data, out")
         def default_size(x):
@@ -27,22 +27,23 @@ class ULayerSet(nn.Module):
         first_out = default_size(self.hidden_dims[0] if not hidden_empty else out_dim)
         size_pairs = [(data_dim, first_out)]
         def get_dropout():
-            return nn.Dropout(dropout, inplace=True)
+            return nn.Dropout(dropout, inplace=True) if dropout > 0. else None
         for hidden_index in range(len(hidden_dims) - 1):
             lhsize, rhsize = map(default_size, hidden_dims[hidden_index:hidden_index + 2])
             size_pairs.append((lhsize, rhsize))
-        size_pairs.append(tuple(map(default_size, (hidden_dims[-1], out_dim))))
-        for lhsize, rhsize in size_pairs:
+        size_pairs.append(tuple(map(default_size, (hidden_dims[-1] if hidden_dims else data_dim, out_dim))))
+        for index, (lhsize, rhsize) in enumerate(size_pairs):
             print("in, out: ", lhsize, rhsize, file=sys.stderr)
             layerlist.append(nn.Linear(lhsize, rhsize))
             if batch_norm:
                 layerlist.append(nn.BatchNorm1d(rhsize, momentum=momentum, eps=eps))
             if layer_norm:
                 layerlist.append(nn.LayerNorm(rhsize))
+            if skip_last_activation and index == len(size_pairs) - 1:
+                continue
             layerlist.append(activation())
-            if dropout > 0.:
-                layerlist.append(get_dropout())
-        self.layers = nn.Sequential(*layerlist)
+            layerlist.append(get_dropout())
+        self.layers = nn.Sequential(*list(filter(lambda x: x, layerlist)))
 
     def forward(self, x):
         return self.layers.forward(x)
@@ -144,13 +145,14 @@ class ZINB:
 #    kl divergence loss -> make this fit the latent space model
 
 class NBVAE(nn.Module):
-    def __init__(self, data_dim, latent_dim, *, hidden_dim=128, linear_settings={}, zero_inflate=False):
+    def __init__(self, data_dim, latent_dim, *, hidden_dim=128, linear_settings={}, zero_inflate=False, full_cov=False, expand_mul=4):
         super().__init__()
         self.current_seed = 0
         self.data_dim = data_dim
         self.hidden_dim = hidden_dim
         self.latent_dim = latent_dim
         self.zero_inflate = zero_inflate
+        self.full_cov = full_cov
         n_layers = linear_settings.get("n_layers", 3)
         batch_norm = linear_settings.get("batch_norm", False)
         layer_norm = linear_settings.get("layer_norm", True)
@@ -173,15 +175,25 @@ class NBVAE(nn.Module):
                                      batch_norm=batch_norm, layer_norm=layer_norm, dropout=enc_dropout)
         self.px_r_scale_dropout_decoder = nn.Linear(
             last_layer_dim, data_dim * self.dim_mul())
-        self.meanvar_encoder = nn.Linear(latent_dim, latent_dim * 2)
+        meanvar_out = self.num_latent_gaussian_parameters()
+        self.meanvar_encoder = ULayerSet(latent_dim, meanvar_out, hidden_dims=[latent_dim * expand_mul], skip_last_activation=True)
+
+    def num_latent_gaussian_parameters(self):
+        if not self.full_cov:
+            return self.latent_dim * 2
+        num_covar = (self.latent_dim * (self.latent_dim - 1)) >> 1
+        num_mean = self.latent_dim
+        return num_covar + num_mean
 
     def dim_mul(self):
         return 2 + self.zero_inflate
 
+    '''
     def next_seed(self):
         ret = self.current_seed
         self.current_seed += 1
         return ret
+    '''
 
     def decode(self, latent, library_size):
         px = self.decoder(latent)
