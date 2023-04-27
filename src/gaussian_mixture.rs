@@ -7,26 +7,33 @@ use tch::{
 struct LatentGM {
     n_components: i64,
     latent_dim: i64,
-    mixture_pi: nn::SequentialT, // logits for mixture components (batch, n_components)
+    prior_pi_logits: Tensor,
+    mixture_pi: nn::SequentialT,
+    // logits for mixture components (batch, n_components)
     // p(y) = cat(mixture_pi)
+    // If Learned, then the parameters are determined by a linear layer from latent to this followed by a softmax.
+    // If not, then
     q_z_covar: nn::SequentialT, // From (n_latent) to (nchoose2(n_components) * latent_dim)
     q_z_means: nn::Linear,
-    /*
-    q_z_covariances: Tensor, // (n_comp, latent_dim, latent_dim)
-    q_z_means: Tensor,
-    q_z_variances: Tensor,
 
-    p_z_covariances: Tensor, // (n_comp, latent_dim, latent_dim)
-    p_z_means: Tensor,
-    p_z_variances: Tensor,
-    z_mean: Tensor,
-    */
-    // qz_given_x_y
-    // layers goes from
-    // input dim (x {counts} + categorical)
-    // -> hidden dim
-    // + then add a linear layer
-    // from hidden dim to [n mixture components * latent dimension
+    p_z_covar_given_y: nn::SequentialT,
+    p_z_mean_given_y: nn::SequentialT, // using mean + covar, we then calculate mean of the distribution for priors later
+                                       /*
+                                       q_z_covariances: Tensor, // (n_comp, latent_dim, latent_dim)
+                                       q_z_means: Tensor,
+                                       q_z_variances: Tensor,
+
+                                       p_z_covariances: Tensor, // (n_comp, latent_dim, latent_dim)
+                                       p_z_means: Tensor,
+                                       p_z_variances: Tensor,
+                                       z_mean: Tensor,
+                                       */
+                                       // qz_given_x_y
+                                       // layers goes from
+                                       // input dim (x {counts} + categorical)
+                                       // -> hidden dim
+                                       // + then add a linear layer
+                                       // from hidden dim to [n mixture components * latent dimension
 }
 // needs to generate:
 // 1. kl_divergence_z
@@ -48,34 +55,51 @@ fn nchoose2(x: i64) -> i64 {
 
 impl LatentGM {
     pub fn new(
-        &self,
         vs: &tch::nn::VarStore,
         latent_dim: i64,
         n_components: i64,
         full_cov: Option<bool>,
+        kind: Option<tch::Kind>,
     ) -> Self {
         let full_cov = full_cov.unwrap_or(false);
-        let mut mixture_pi = nn::seq_t();
-        mixture_pi = mixture_pi.add(nn::linear(
-            vs.root() / "mixture_pi",
-            latent_dim,
-            n_components,
-            Default::default(),
-        ));
-        mixture_pi = mixture_pi.add_fn(|xs| xs.softmax(-1i64, xs.kind()));
+        let kind = kind.unwrap_or(tch::Kind::Float);
+        let mixture_pi = nn::seq_t()
+            .add(nn::linear(
+                vs.root() / "mixture_pi",
+                latent_dim,
+                n_components,
+                Default::default(),
+            ))
+            .add_fn(|xs| xs.softmax(-1i64, xs.kind()));
+        let prior_pi_logits = Tensor::randn(&[n_components], (kind, vs.device()));
         let num_covar_inputs = if full_cov {
             nchoose2(latent_dim)
         } else {
             latent_dim // diagonal cov
         } * n_components;
-        let mut q_z_covar = nn::seq_t();
-        q_z_covar = q_z_covar.add(nn::linear(
-            vs.root() / "q_z_covar",
+        let num_input_features = latent_dim + n_components;
+        let q_z_covar = nn::seq_t()
+            .add(nn::linear(
+                vs.root() / "q_z_covar",
+                latent_dim,
+                num_covar_inputs,
+                Default::default(),
+            ))
+            .add_fn(|xs| xs.softplus());
+        let p_z_covar_given_y = nn::seq_t()
+            .add(nn::linear(
+                vs.root() / "p_z_given_y",
+                n_components,
+                num_covar_inputs,
+                Default::default(),
+            ))
+            .add_fn(|xs| xs.softplus());
+        let p_z_mean_given_y = nn::seq_t().add(nn::linear(
+            vs.root() / "p_z_given_y",
+            n_components,
             latent_dim,
-            num_covar_inputs,
             Default::default(),
         ));
-        q_z_covar = q_z_covar.add_fn(|xs| xs.softplus());
         let q_z_means = nn::linear(
             vs.root() / "q_z_means",
             latent_dim,
@@ -86,9 +110,41 @@ impl LatentGM {
             mixture_pi,
             latent_dim,
             n_components,
+            p_z_mean_given_y,
+            p_z_covar_given_y,
             q_z_covar,
             q_z_means,
+            prior_pi_logits,
         }
+    }
+    // We don't need a kl categorical loss because we are using the model to select the mixture components.
+}
+
+mod tests {
+    use crate::gaussian_mixture::*;
+    #[test]
+    fn test_stuff() {
+        /*
+        pub fn new(
+            &self,
+            vs: &tch::nn::VarStore,
+            latent_dim: i64,
+            n_components: i64,
+            full_cov: Option<bool>,
+            kind: Option<tch::Kind>,
+        ) -> Self {
+            let full_cov = full_cov.unwrap_or(false);
+
+            */
+        let vs = tch::nn::VarStore::new(Device::Cpu);
+        let latent_mix = LatentGM::new(&vs, 128i64, 4i64, Some(true), Some(Kind::Float));
+        /*
+        vs: &tch::nn::VarStore,
+        latent_dim: i64,
+        n_components: i64,
+        full_cov: Option<bool>,
+        kind: Option<tch::Kind>,
+        */
     }
 }
 

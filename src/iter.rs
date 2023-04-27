@@ -310,10 +310,11 @@ impl Iterator for IterCSR {
 
 pub mod tests {
     use crate::iter::CSRMatrix;
+    use tch::{Device, Kind};
     #[test]
     fn test_csr_index_put() {
-        const nnz: i64 = 25;
-        let indices = (0..25).collect::<Vec<i32>>();
+        const NNZ: i64 = 25;
+        let indices = (0i64..nnz).collect::<Vec<i64>>();
         let indptr = (0..6).map(|x| x * 5).collect::<Vec<i32>>();
         let nrows = 5;
         let ncols = 1000;
@@ -325,7 +326,6 @@ pub mod tests {
             kind: Kind::Float,
         };
         let ex = csrmat.extract_range(0..5);
-        let ex2 = csrmat.extract_range_indexput(0..5);
-        assert!(ex.isclose(&ex2, 1e-5, 1e-8, false));
+        assert!(ex.allclose(&csrmat.extract_range_indexput(0..5), 1e-5, 1e-8, false));
     }
 }

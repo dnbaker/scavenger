@@ -1,10 +1,52 @@
+import sys
+
 import torch
+
 import torch.nn as nn
 import torch.nn.functional as F
-
 import numpy as np
 
 VAR_EPS = 1e-4
+
+
+class ULayerSet(nn.Module):
+    def __init__(self, data_dim, out_dim, hidden_dims=[-1, -1], batch_norm=False, layer_norm=True, dropout=0.1, momentum=0.01, eps=1e-3, activation=nn.Mish):
+        super().__init__()
+        print(data_dim, out_dim, "data, out")
+        def default_size(x):
+            return x if x > 0 else int(np.ceil(data_dim / np.sqrt(data_dim / out_dim)))
+        self.data_dim = data_dim
+        self.out_dim = out_dim
+        self.hidden_dims = hidden_dims
+        self.n_layers = len(hidden_dims) + 1
+        self.batch_norm = batch_norm
+        self.layer_norm = layer_norm
+        self.dropout = dropout
+        layerlist = []
+        hidden_empty = len(self.hidden_dims) == 0
+        first_out = default_size(self.hidden_dims[0] if not hidden_empty else out_dim)
+        size_pairs = [(data_dim, first_out)]
+        def get_dropout():
+            return nn.Dropout(dropout, inplace=True)
+        for hidden_index in range(len(hidden_dims) - 1):
+            lhsize, rhsize = map(default_size, hidden_dims[hidden_index:hidden_index + 2])
+            size_pairs.append((lhsize, rhsize))
+        size_pairs.append(tuple(map(default_size, (hidden_dims[-1], out_dim))))
+        for lhsize, rhsize in size_pairs:
+            print("in, out: ", lhsize, rhsize, file=sys.stderr)
+            layerlist.append(nn.Linear(lhsize, rhsize))
+            if batch_norm:
+                layerlist.append(nn.BatchNorm1d(rhsize, momentum=momentum, eps=eps))
+            if layer_norm:
+                layerlist.append(nn.LayerNorm(rhsize))
+            layerlist.append(activation())
+            if dropout > 0.:
+                layerlist.append(get_dropout())
+        self.layers = nn.Sequential(*layerlist)
+
+    def forward(self, x):
+        return self.layers.forward(x)
+
 
 
 class LayerSet(nn.Module):
@@ -28,7 +70,7 @@ class LayerSet(nn.Module):
             ind = get_in(idx)
             outd = get_out(idx)
             layerlist.append(nn.Linear(ind, outd))
-            print(f"Layer {idx} from {ind} to {outd}")
+            # print(f"Layer {idx} from {ind} to {outd}")
             if batch_norm:
                 layerlist.append(nn.BatchNorm1d(outd, momentum=0.01, eps=1e-3))
             if layer_norm:
@@ -94,6 +136,13 @@ class ZINB:
         return log_likelihood_zinb(x, mu=self.mu, theta=self.theta, scale=self.scale, zi_logits=self.zi_logits)
 
 
+# inputs ->
+#  fclayers
+#    latent dim
+#      sample (+ noise)
+#    reconstruct        -> negative binomial loss
+#    kl divergence loss -> make this fit the latent space model
+
 class NBVAE(nn.Module):
     def __init__(self, data_dim, latent_dim, *, hidden_dim=128, linear_settings={}, zero_inflate=False):
         super().__init__()
@@ -108,12 +157,22 @@ class NBVAE(nn.Module):
         enc_dropout = linear_settings.get("dropout", 0.1)
         dec_dropout = linear_settings.get(
             "dropout", linear_settings.get("decoder_dropout", 0.0))
-        self.encoder = LayerSet(data_dim, out_dim=latent_dim, n_layers=n_layers,
-                                batch_norm=batch_norm, layer_norm=layer_norm, dropout=enc_dropout)
-        self.decoder = LayerSet(latent_dim, out_dim=hidden_dim, n_layers=n_layers,
-                                batch_norm=batch_norm, layer_norm=layer_norm, dropout=enc_dropout)
+        if isinstance(hidden_dim, int):
+            self.encoder = LayerSet(data_dim, out_dim=latent_dim, n_layers=n_layers, hidden_dim=hidden_dim,
+                                    batch_norm=batch_norm, layer_norm=layer_norm, dropout=enc_dropout)
+            self.decoder = LayerSet(latent_dim, out_dim=hidden_dim, n_layers=n_layers, hidden_dim=hidden_dim,
+                                    batch_norm=batch_norm, layer_norm=layer_norm, dropout=dec_dropout)
+            last_layer_dim = hidden_dim
+        else:
+            print(f"Encoding with {hidden_dim}, ecoding with {hidden_dim[::-1]}", file=sys.stderr)
+            self.encoder = ULayerSet(data_dim, out_dim=latent_dim, hidden_dims=hidden_dim,
+                                    batch_norm=batch_norm, layer_norm=layer_norm, dropout=enc_dropout)
+            last_layer_dim = hidden_dim[0] if hidden_dim[0] > 0 else int(np.ceil(data_dim / np.sqrt(data_dim / latent_dim)))
+            print(last_layer_dim, "last layer dim for latent = ", latent_dim, " and data = ", data_dim, file=sys.stderr)
+            self.decoder = ULayerSet(latent_dim, out_dim=last_layer_dim, hidden_dims=hidden_dim[::-1],
+                                     batch_norm=batch_norm, layer_norm=layer_norm, dropout=enc_dropout)
         self.px_r_scale_dropout_decoder = nn.Linear(
-            hidden_dim, data_dim * self.dim_mul())
+            last_layer_dim, data_dim * self.dim_mul())
         self.meanvar_encoder = nn.Linear(latent_dim, latent_dim * 2)
 
     def dim_mul(self):
@@ -157,7 +216,7 @@ class NBVAE(nn.Module):
         packed_inputs += [data.mu, data.theta, data.scale]
         if self.zero_inflate:
             packed_inputs.append(data.zi_logits)
-        print([x.shape for x in packed_inputs])
+        # print([x.shape for x in packed_inputs])
         packed_result = torch.cat(packed_inputs, -1)
         return packed_result
 
@@ -169,3 +228,9 @@ class NBVAE(nn.Module):
         (nb_recon_loss, mu, theta, scale) = full_data[:4]
         zi_logits = full_data[4] if self.zero_inflate else None
         return ((latent, gen, mu, logvar), (kl_loss, nb_recon_loss), ZINB(scale=scale, mu=mu, theta=theta, zi_logits=zi_logits))
+
+    def labeled_unpack(self, unpacked_result):
+        if not isinstance(unpacked_result, tuple):
+            unpacked_result = self.unpack(unpacked_result)
+        latent, losses, dist = unpacked_result
+        return {"latent": {"sampled": latent[0], "mu": latent[1], "logvar": latent[2]}, "loss": {"kl": losses[0], "recon": losses[1]}, "dist": dist}
