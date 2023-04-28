@@ -8,6 +8,9 @@ import numpy as np
 
 VAR_EPS = 1e-4
 
+def nchoose2(x):
+    return (x * (x - 1)) // 2
+
 
 class ULayerSet(nn.Module):
     def __init__(self, data_dim, out_dim, hidden_dims=[-1, -1], batch_norm=False, layer_norm=True, dropout=0.1, momentum=0.01, eps=1e-3, activation=nn.Mish, skip_last_activation=False):
@@ -137,6 +140,25 @@ class ZINB:
         return log_likelihood_zinb(x, mu=self.mu, theta=self.theta, scale=self.scale, zi_logits=self.zi_logits)
 
 
+def tril2full_and_nonneg(tril, dim, nonneg_function=torch.nn.functional.softplus):
+    '''
+        Input: Tensor, lower triangular covariance matrix
+            (Batch, triangular size) [N Choose 2) + N]
+        Output: Tensor, full covariance matrix
+            (Batch, N, N)
+    '''
+    batch, *remaining = tril.shape
+    xidx, yidx = torch.tril_indices(dim, dim)
+    diag_idx_mask = torch.arange(xidx.shape[0])
+    xdiag, ydiag = (z[diag_idx_mask] for z in (xidx, yidx))
+    unpacked = torch.zeros([batch, dim, dim], dtype=tril.dtype)
+    unpacked[:, xidx, yidx] = tril
+    unpacked[:, xdiag, ydiag] = nonneg_function(unpacked[:, xdiag, ydiag])
+    # Ensure positive definite covariance matrix by making variance non-negative
+    # Can use softplus or exp, but softplus is probably more stable
+    return unpacked
+
+
 # inputs ->
 #  fclayers
 #    latent dim
@@ -145,7 +167,7 @@ class ZINB:
 #    kl divergence loss -> make this fit the latent space model
 
 class NBVAE(nn.Module):
-    def __init__(self, data_dim, latent_dim, *, hidden_dim=128, linear_settings={}, zero_inflate=False, full_cov=False, expand_mul=4):
+    def __init__(self, data_dim, latent_dim, *, hidden_dim=128, linear_settings={}, zero_inflate=False, full_cov=False, expand_mul=4, nonneg_function=torch.nn.functional.softplus):
         super().__init__()
         self.current_seed = 0
         self.data_dim = data_dim
@@ -153,6 +175,7 @@ class NBVAE(nn.Module):
         self.latent_dim = latent_dim
         self.zero_inflate = zero_inflate
         self.full_cov = full_cov
+        self.nonneg_function = nonneg_function
         n_layers = linear_settings.get("n_layers", 3)
         batch_norm = linear_settings.get("batch_norm", False)
         layer_norm = linear_settings.get("layer_norm", True)
@@ -178,10 +201,13 @@ class NBVAE(nn.Module):
         meanvar_out = self.num_latent_gaussian_parameters()
         self.meanvar_encoder = ULayerSet(latent_dim, meanvar_out, hidden_dims=[latent_dim * expand_mul], skip_last_activation=True)
 
+    def num_cov_variables(self):
+        return nchoose2(self.latent_dim) + self.latent_dim
+
     def num_latent_gaussian_parameters(self):
         if not self.full_cov:
             return self.latent_dim * 2
-        num_covar = (self.latent_dim * (self.latent_dim - 1)) >> 1
+        num_covar = self.num_cov_variables()
         num_mean = self.latent_dim
         return num_covar + num_mean
 
@@ -202,21 +228,48 @@ class NBVAE(nn.Module):
         dropout = output_chunked[2] if self.zero_inflate else None
         scale = F.softplus(output_chunked[1])
         r = output_chunked[0].exp()
-        px_rate = library_size.exp() * scale
+        px_rate = library_size * scale
         return ZINB(scale=scale, theta=r, mu=px_rate, zi_logits=dropout)
 
     def run(self, x):
         latent = self.encoder(x)
         meanvar = self.meanvar_encoder(latent)
-        stdeps = meanvar.chunk(2, -1)
-        mu, logvar = stdeps
-        std = (logvar * 0.5).exp() + VAR_EPS
-        eps = torch.randn_like(std)
-        gen = mu + eps * std
-        latent_outputs = (gen, mu, logvar)
-        library_size = x.sum(dim=[1]).log().unsqueeze(1)
+        mu = meanvar[:,:self.latent_dim]
+        if self.full_cov:
+            full_cov = tril2full_and_nonneg(F.softplus(meanvar[:,self.latent_dim:]), self.latent_dim, self.nonneg_function)
+            # dist = torch.distributions.MultivariateNormal(loc=mu, scale_tril=full_cov)
+            #gen = dist.rsample()
+            batch_size = x.shape[0]
+            noise = torch.randn((batch_size, self.latent_dim))
+            noise_squeeze = noise.unsqueeze(-1)
+            mulout = torch.bmm(full_cov, noise_squeeze).squeeze()
+            # print("mu: ", mu.shape, "fullcov", full_cov.shape, "noise_sq", noise_squeeze.shape, "mulout", mulout.shape)
+            gen = mu + mulout
+            latent_outputs = (gen, mu, full_cov.reshape(full_cov.shape[0], -1)) # (B L, B L, B LxL)
+            latent_range = torch.arange(self.latent_dim)
+            var = full_cov[:, latent_range, latent_range]
+            logvar = var.log()
+            #log_q_z = -.5*(noise.square() + logvar + log2pi)
+            #log_p_z = -.5*(z**2 + log2pi)
+            # the log2pi cancels out
+            # log_q_z = -.5*(noise.square() + logvar)
+            # log_p_z = -.5*(z**2)
+            # kl_loss = -log_p_z + log_q_z
+            # log_q_z = -.5*(noise.square() + logvar)
+            # log_p_z = -.5*(z**2)
+            kl_loss = .5 * (gen.square() - (noise.square() + logvar) )
+            # kl_loss = -log_p_z + log_q_z
+            # https://arxiv.org/pdf/1906.02691.pdf, page 29
+        else:
+            var = self.nonneg_function(meanvar[:,self.latent_dim:])
+            logvar = var.log()
+            std = (logvar * 0.5).exp() + VAR_EPS
+            eps = torch.randn_like(std)
+            gen = mu + eps * std
+            latent_outputs = (gen, mu, logvar)
+            kl_loss = -0.5 * (1 + logvar - torch.pow(mu, 2) - logvar.exp())
+        library_size = x.sum(dim=[1]).unsqueeze(1)
         decoded = self.decode(gen, library_size)
-        kl_loss = -0.5 * (1 + logvar - torch.pow(mu, 2) - logvar.exp())
         nb_recon_loss = -decoded.log_prob(x)
         losses = (kl_loss, nb_recon_loss)
         return latent_outputs, losses, decoded
@@ -228,13 +281,29 @@ class NBVAE(nn.Module):
         packed_inputs += [data.mu, data.theta, data.scale]
         if self.zero_inflate:
             packed_inputs.append(data.zi_logits)
-        # print([x.shape for x in packed_inputs])
+        print([x.shape for x in packed_inputs])
+        for ix, x in enumerate(packed_inputs):
+            print(ix, x.shape)
+        assert all(len(x.shape) == 2 for x in packed_inputs)
         packed_result = torch.cat(packed_inputs, -1)
         return packed_result
 
     def unpack(self, packed_result):
-        latent_data = packed_result[:,:self.latent_dim * 5]
-        (latent, gen, mu, logvar, kl_loss) = latent_data.chunk(5, -1)
+        total = packed_result.shape[1]
+        print("total:", packed_result.shape)
+        if self.full_cov:
+            total_latent = (self.latent_dim * 3) + self.num_cov_variables() + self.latent_dim
+            latent_data = packed_result[:,:total_latent]
+            latent, gen = latent_data[:,self.latent_dim * 2].chunk(2, -1)
+            remaining = latent_data[:,self.latent_dim * 2:]
+            print(f"Remaining: {remaining.shape}. numcov: {self.num_cov_variables()}")
+            full_cov = remaining[:,:self.num_cov_variables()]
+            assert full_cov.shape[1] == self.num_cov_variables(), f"{self.num_cov_variables()} vs {full_cov.shape}"
+            kl_loss = latent_data[:,self.num_cov_variables():]
+            assert kl_loss.shape[1] == self.latent_dim, f"{kl_loss.shape}"
+        else:
+            latent_data = packed_result[:,:self.latent_dim * 5]
+            (latent, gen, mu, logvar, kl_loss) = latent_data.chunk(5, -1)
         n_data_chunks = 4 + self.zero_inflate
         full_data = packed_result[:,self.latent_dim * 5:].chunk(n_data_chunks, -1)
         (nb_recon_loss, mu, theta, scale) = full_data[:4]

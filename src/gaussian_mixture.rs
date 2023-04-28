@@ -13,7 +13,7 @@ struct LatentGM {
     // p(y) = cat(mixture_pi)
     // If Learned, then the parameters are determined by a linear layer from latent to this followed by a softmax.
     // If not, then
-    q_z_covar: nn::SequentialT, // From (n_latent) to (nchoose2(n_components) * latent_dim)
+    q_z_covar: nn::SequentialT, // From (n_latent) to (nchoose2plusn(n_components) * latent_dim)
     q_z_means: nn::Linear,
 
     p_z_covar_given_y: nn::SequentialT,
@@ -52,6 +52,9 @@ struct LatentGM {
 fn nchoose2(x: i64) -> i64 {
     x * (x - 1) / 2
 }
+fn nchoose2plusn(x: i64) -> i64 {
+    nchoose2(x) + x
+}
 
 impl LatentGM {
     pub fn new(
@@ -73,7 +76,7 @@ impl LatentGM {
             .add_fn(|xs| xs.softmax(-1i64, xs.kind()));
         let prior_pi_logits = Tensor::randn(&[n_components], (kind, vs.device()));
         let num_covar_inputs = if full_cov {
-            nchoose2(latent_dim)
+            nchoose2plusn(latent_dim)
         } else {
             latent_dim // diagonal cov
         } * n_components;
