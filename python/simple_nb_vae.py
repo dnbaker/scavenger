@@ -1,23 +1,48 @@
 import sys
 
 import torch
-
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
 VAR_EPS = 1e-4
 
+
 def nchoose2(x):
     return (x * (x - 1)) // 2
 
 
+def default_size(x, in_dim, out_dim):
+    if x > 0:
+        return x
+    return int(np.ceil(in_dim / np.sqrt(in_dim / out_dim)))
+
+
+def in_outs(data_dim, out_dim, hidden_dims=[-1, -1]):
+    hidden_empty = not hidden_dims
+    def def_size(x):
+        return default_size(x, data_dim, out_dim)
+    first_out = def_size(hidden_dims[0] if not hidden_empty else out_dim)
+    size_pairs = [(data_dim, first_out)]
+    for hidden_index in range(len(hidden_dims) - 1):
+        lhsize, rhsize = map(
+            def_size, hidden_dims[hidden_index:hidden_index + 2])
+        size_pairs.append((lhsize, rhsize))
+    size_pairs.append(tuple(
+        map(def_size, (hidden_dims[-1] if hidden_dims else data_dim, out_dim))))
+    print(
+        f"sizepairs: {size_pairs}. in: {data_dim}, out: {out_dim} and hiddens {hidden_dims}", file=sys.stderr)
+    return size_pairs
+
+
 class ULayerSet(nn.Module):
-    def __init__(self, data_dim, out_dim, hidden_dims=[-1, -1], batch_norm=False, layer_norm=True, dropout=0.1, momentum=0.01, eps=1e-3, activation=nn.Mish, skip_last_activation=False):
+    def __init__(self, data_dim, out_dim, hidden_dims=[-1, -1],
+                 batch_norm=False, layer_norm=True, dropout=0.1,
+                 momentum=0.01, eps=1e-3, activation=nn.Mish,
+                 skip_last_activation=False):
         super().__init__()
-        print(data_dim, out_dim, "data, out")
-        def default_size(x):
-            return x if x > 0 else int(np.ceil(data_dim / np.sqrt(data_dim / out_dim)))
+        # print(data_dim, out_dim, "data, out")
+
         self.data_dim = data_dim
         self.out_dim = out_dim
         self.hidden_dims = hidden_dims
@@ -27,19 +52,19 @@ class ULayerSet(nn.Module):
         self.dropout = dropout
         layerlist = []
         hidden_empty = len(self.hidden_dims) == 0
-        first_out = default_size(self.hidden_dims[0] if not hidden_empty else out_dim)
-        size_pairs = [(data_dim, first_out)]
+        first_out = default_size(
+            self.hidden_dims[0] if not hidden_empty else out_dim, data_dim, out_dim)
+        size_pairs = in_outs(data_dim, out_dim, hidden_dims)
+
         def get_dropout():
             return nn.Dropout(dropout, inplace=True) if dropout > 0. else None
-        for hidden_index in range(len(hidden_dims) - 1):
-            lhsize, rhsize = map(default_size, hidden_dims[hidden_index:hidden_index + 2])
-            size_pairs.append((lhsize, rhsize))
-        size_pairs.append(tuple(map(default_size, (hidden_dims[-1] if hidden_dims else data_dim, out_dim))))
+        # print("sizes: ", size_pairs, "for hidden ", hidden_dims, "and input ", data_dim, " and out ", out_dim)
         for index, (lhsize, rhsize) in enumerate(size_pairs):
-            print("in, out: ", lhsize, rhsize, file=sys.stderr)
+            # print("in, out: ", lhsize, rhsize, file=sys.stderr)
             layerlist.append(nn.Linear(lhsize, rhsize))
             if batch_norm:
-                layerlist.append(nn.BatchNorm1d(rhsize, momentum=momentum, eps=eps))
+                layerlist.append(nn.BatchNorm1d(
+                    rhsize, momentum=momentum, eps=eps))
             if layer_norm:
                 layerlist.append(nn.LayerNorm(rhsize))
             if skip_last_activation and index == len(size_pairs) - 1:
@@ -50,7 +75,6 @@ class ULayerSet(nn.Module):
 
     def forward(self, x):
         return self.layers.forward(x)
-
 
 
 class LayerSet(nn.Module):
@@ -140,7 +164,7 @@ class ZINB:
         return log_likelihood_zinb(x, mu=self.mu, theta=self.theta, scale=self.scale, zi_logits=self.zi_logits)
 
 
-def tril2full_and_nonneg(tril, dim, nonneg_function=torch.nn.functional.softplus):
+def tril2full_and_nonneg(tril, dim, nonneg_function=F.softplus):
     '''
         Input: Tensor, lower triangular covariance matrix
             (Batch, triangular size) [N Choose 2) + N]
@@ -167,7 +191,7 @@ def tril2full_and_nonneg(tril, dim, nonneg_function=torch.nn.functional.softplus
 #    kl divergence loss -> make this fit the latent space model
 
 class NBVAE(nn.Module):
-    def __init__(self, data_dim, latent_dim, *, hidden_dim=128, linear_settings={}, zero_inflate=False, full_cov=False, expand_mul=4, nonneg_function=torch.nn.functional.softplus):
+    def __init__(self, data_dim, latent_dim, *, hidden_dim=128, linear_settings={}, zero_inflate=False, full_cov=False, expand_mul=4, nonneg_function=F.softplus):
         super().__init__()
         self.current_seed = 0
         self.data_dim = data_dim
@@ -189,17 +213,21 @@ class NBVAE(nn.Module):
                                     batch_norm=batch_norm, layer_norm=layer_norm, dropout=dec_dropout)
             last_layer_dim = hidden_dim
         else:
-            print(f"Encoding with {hidden_dim}, ecoding with {hidden_dim[::-1]}", file=sys.stderr)
             self.encoder = ULayerSet(data_dim, out_dim=latent_dim, hidden_dims=hidden_dim,
-                                    batch_norm=batch_norm, layer_norm=layer_norm, dropout=enc_dropout)
-            last_layer_dim = hidden_dim[0] if hidden_dim[0] > 0 else int(np.ceil(data_dim / np.sqrt(data_dim / latent_dim)))
-            print(last_layer_dim, "last layer dim for latent = ", latent_dim, " and data = ", data_dim, file=sys.stderr)
-            self.decoder = ULayerSet(latent_dim, out_dim=last_layer_dim, hidden_dims=hidden_dim[::-1],
                                      batch_norm=batch_norm, layer_norm=layer_norm, dropout=enc_dropout)
+            last_layer_dim = hidden_dim[0] if hidden_dim[0] > 0 else int(
+                np.ceil(data_dim / np.sqrt(data_dim / latent_dim)))
+            '''
+            print(last_layer_dim, "last layer dim for latent = ",
+                  latent_dim, " and data = ", data_dim, " with hiddens = ", hidden_dim, " and rev hids ", hidden_dim[::-1], file=sys.stderr)
+            '''
+            self.decoder = ULayerSet(latent_dim, out_dim=last_layer_dim, hidden_dims=hidden_dim[::-1],
+                                     batch_norm=batch_norm, layer_norm=layer_norm, dropout=dec_dropout)
         self.px_r_scale_dropout_decoder = nn.Linear(
             last_layer_dim, data_dim * self.dim_mul())
         meanvar_out = self.num_latent_gaussian_parameters()
-        self.meanvar_encoder = ULayerSet(latent_dim, meanvar_out, hidden_dims=[latent_dim * expand_mul], skip_last_activation=True)
+        self.meanvar_encoder = ULayerSet(latent_dim, meanvar_out, hidden_dims=[
+                                         latent_dim * expand_mul], skip_last_activation=True)
 
     def num_cov_variables(self):
         return nchoose2(self.latent_dim) + self.latent_dim
@@ -234,12 +262,13 @@ class NBVAE(nn.Module):
     def run(self, x):
         latent = self.encoder(x)
         meanvar = self.meanvar_encoder(latent)
-        mu = meanvar[:,:self.latent_dim]
+        mu = meanvar[:, :self.latent_dim]
         full_cov = None
         if self.full_cov:
-            full_cov = tril2full_and_nonneg(F.softplus(meanvar[:,self.latent_dim:]), self.latent_dim, self.nonneg_function)
+            full_cov = tril2full_and_nonneg(F.softplus(
+                meanvar[:, self.latent_dim:]), self.latent_dim, self.nonneg_function)
             # dist = torch.distributions.MultivariateNormal(loc=mu, scale_tril=full_cov)
-            #gen = dist.rsample()
+            # gen = dist.rsample()
             batch_size = x.shape[0]
             noise = torch.randn((batch_size, self.latent_dim))
             noise_squeeze = noise.unsqueeze(-1)
@@ -249,19 +278,19 @@ class NBVAE(nn.Module):
             latent_range = torch.arange(self.latent_dim)
             var = full_cov[:, latent_range, latent_range]
             logvar = var.log()
-            #log_q_z = -.5*(noise.square() + logvar + log2pi)
-            #log_p_z = -.5*(z**2 + log2pi)
+            # log_q_z = -.5*(noise.square() + logvar + log2pi)
+            # log_p_z = -.5*(z**2 + log2pi)
             # the log2pi cancels out
             # log_q_z = -.5*(noise.square() + logvar)
             # log_p_z = -.5*(z**2)
             # kl_loss = -log_p_z + log_q_z
             # log_q_z = -.5*(noise.square() + logvar)
             # log_p_z = -.5*(z**2)
-            kl_loss = .5 * (gen.square() - (noise.square() + logvar) )
+            kl_loss = .5 * (gen.square() - (noise.square() + logvar))
             # kl_loss = -log_p_z + log_q_z
             # https://arxiv.org/pdf/1906.02691.pdf, page 29
         else:
-            var = self.nonneg_function(meanvar[:,self.latent_dim:])
+            var = self.nonneg_function(meanvar[:, self.latent_dim:])
             logvar = var.log()
             std = (logvar * 0.5).exp() + VAR_EPS
             eps = torch.randn_like(std)
@@ -276,6 +305,10 @@ class NBVAE(nn.Module):
             full_cov = full_cov.reshape(full_cov.shape[0], -1)
         return latent_outputs, losses, decoded, full_cov
 
+    '''
+    def __call__(self, *args, **kwargs):
+        return super().__call__(*args, **kwargs)
+    '''
 
     def forward(self, x):
         latent, losses, data, full_cov = self.run(x)
@@ -287,30 +320,34 @@ class NBVAE(nn.Module):
         packed_inputs += [data.mu, data.theta, data.scale]
         if self.zero_inflate:
             packed_inputs.append(data.zi_logits)
-        print([x.shape for x in packed_inputs])
-        for ix, x in enumerate(packed_inputs):
-            print(ix, x.shape)
         assert all(len(x.shape) == 2 for x in packed_inputs)
         packed_result = torch.cat(packed_inputs, -1)
+        # print(f"packed_result: {packed_result}", file=sys.stderr)
         return packed_result
 
     def unpack(self, packed_result):
         total = packed_result.shape[1]
-        print("total:", packed_result.shape)
-        end_of_latent_without_cov = self.latent_dim * (5 + self.latent_dim)
-        end_of_latent = end_of_latent_without_cov + (self.latent_dim ** 2 if self.full_cov else 0)
-        latent_data = packed_result[:,:end_of_latent]
-        latent, gen, mu, logvar, kl_loss = latent_data[:,:end_of_latent_without_cov].chunk(5, -1)
+        # print("total:", packed_result.shape)
+        end_of_latent_without_cov = self.latent_dim * 5
+        end_of_latent = end_of_latent_without_cov + \
+            (self.latent_dim ** 2 if self.full_cov else 0)
+        latent_data = packed_result[:, :end_of_latent]
+        latent, gen, mu, logvar, kl_loss = latent_data[:, :end_of_latent_without_cov].chunk(
+            5, -1)
         if self.full_cov:
-            remaining = latent_data[:,end_of_latent_without_cov:]
-            print(f"Remaining: {remaining.shape}. numcov: {self.num_cov_variables()}")
-            full_cov = remaining[:,:]
+            remaining = latent_data[:, end_of_latent_without_cov:]
+            # print(
+            #    f"Remaining: {remaining.shape}. numcov: {self.num_cov_variables()}")
+            full_cov = remaining[:, :]
             assert full_cov.shape[1] == self.latent_dim ** 2, f"{self.latent_dim**2} vs {full_cov.shape}"
-            assert kl_loss.shape[1] == self.latent_dim, f"{kl_loss.shape}"
+            assert kl_loss.shape[1] == self.latent_dim, f"{kl_loss.shape}, vs latent {self.latent_dim}"
         n_data_chunks = 4 + self.zero_inflate
-        full_data = packed_result[:,end_of_latent:].chunk(n_data_chunks, -1)
+        full_data = packed_result[:, end_of_latent:].chunk(n_data_chunks, -1)
         (nb_recon_loss, mu, theta, scale) = full_data[:4]
         zi_logits = full_data[4] if self.zero_inflate else None
+        # print([x.shape for x in (latent, gen, mu, logvar, kl_loss)], "latent")
+        # print([x.shape for x in (nb_recon_loss, scale, mu, theta)],
+        #      "data: recon, scale, mu, theta")
         return ((latent, gen, mu, logvar), (kl_loss, nb_recon_loss), ZINB(scale=scale, mu=mu, theta=theta, zi_logits=zi_logits))
 
     def labeled_unpack(self, unpacked_result):
