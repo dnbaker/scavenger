@@ -235,6 +235,7 @@ class NBVAE(nn.Module):
         latent = self.encoder(x)
         meanvar = self.meanvar_encoder(latent)
         mu = meanvar[:,:self.latent_dim]
+        full_cov = None
         if self.full_cov:
             full_cov = tril2full_and_nonneg(F.softplus(meanvar[:,self.latent_dim:]), self.latent_dim, self.nonneg_function)
             # dist = torch.distributions.MultivariateNormal(loc=mu, scale_tril=full_cov)
@@ -245,7 +246,6 @@ class NBVAE(nn.Module):
             mulout = torch.bmm(full_cov, noise_squeeze).squeeze()
             # print("mu: ", mu.shape, "fullcov", full_cov.shape, "noise_sq", noise_squeeze.shape, "mulout", mulout.shape)
             gen = mu + mulout
-            latent_outputs = (gen, mu, full_cov.reshape(full_cov.shape[0], -1)) # (B L, B L, B LxL)
             latent_range = torch.arange(self.latent_dim)
             var = full_cov[:, latent_range, latent_range]
             logvar = var.log()
@@ -266,18 +266,24 @@ class NBVAE(nn.Module):
             std = (logvar * 0.5).exp() + VAR_EPS
             eps = torch.randn_like(std)
             gen = mu + eps * std
-            latent_outputs = (gen, mu, logvar)
             kl_loss = -0.5 * (1 + logvar - torch.pow(mu, 2) - logvar.exp())
+        latent_outputs = (gen, mu, logvar)
         library_size = x.sum(dim=[1]).unsqueeze(1)
         decoded = self.decode(gen, library_size)
         nb_recon_loss = -decoded.log_prob(x)
         losses = (kl_loss, nb_recon_loss)
-        return latent_outputs, losses, decoded
+        if full_cov is not None:
+            full_cov = full_cov.reshape(full_cov.shape[0], -1)
+        return latent_outputs, losses, decoded, full_cov
 
 
     def forward(self, x):
-        latent, losses, data = self.run(x)
-        packed_inputs = list(latent) + list(losses)
+        latent, losses, data, full_cov = self.run(x)
+        kl_loss, recon_loss = losses
+        packed_inputs = list(latent) + [kl_loss]
+        if full_cov is not None:
+            packed_inputs.append(full_cov)
+        packed_inputs += list(losses)
         packed_inputs += [data.mu, data.theta, data.scale]
         if self.zero_inflate:
             packed_inputs.append(data.zi_logits)
@@ -291,21 +297,18 @@ class NBVAE(nn.Module):
     def unpack(self, packed_result):
         total = packed_result.shape[1]
         print("total:", packed_result.shape)
+        end_of_latent_without_cov = self.latent_dim * (5 + self.latent_dim)
+        end_of_latent = end_of_latent_without_cov + (self.latent_dim ** 2 if self.full_cov else 0)
+        latent_data = packed_result[:,:end_of_latent]
+        latent, gen, mu, logvar, kl_loss = latent_data[:,:end_of_latent_without_cov].chunk(5, -1)
         if self.full_cov:
-            total_latent = (self.latent_dim * 3) + self.num_cov_variables() + self.latent_dim
-            latent_data = packed_result[:,:total_latent]
-            latent, gen = latent_data[:,self.latent_dim * 2].chunk(2, -1)
-            remaining = latent_data[:,self.latent_dim * 2:]
+            remaining = latent_data[:,end_of_latent_without_cov:]
             print(f"Remaining: {remaining.shape}. numcov: {self.num_cov_variables()}")
-            full_cov = remaining[:,:self.num_cov_variables()]
-            assert full_cov.shape[1] == self.num_cov_variables(), f"{self.num_cov_variables()} vs {full_cov.shape}"
-            kl_loss = latent_data[:,self.num_cov_variables():]
+            full_cov = remaining[:,:]
+            assert full_cov.shape[1] == self.latent_dim ** 2, f"{self.latent_dim**2} vs {full_cov.shape}"
             assert kl_loss.shape[1] == self.latent_dim, f"{kl_loss.shape}"
-        else:
-            latent_data = packed_result[:,:self.latent_dim * 5]
-            (latent, gen, mu, logvar, kl_loss) = latent_data.chunk(5, -1)
         n_data_chunks = 4 + self.zero_inflate
-        full_data = packed_result[:,self.latent_dim * 5:].chunk(n_data_chunks, -1)
+        full_data = packed_result[:,end_of_latent:].chunk(n_data_chunks, -1)
         (nb_recon_loss, mu, theta, scale) = full_data[:4]
         zi_logits = full_data[4] if self.zero_inflate else None
         return ((latent, gen, mu, logvar), (kl_loss, nb_recon_loss), ZINB(scale=scale, mu=mu, theta=theta, zi_logits=zi_logits))
