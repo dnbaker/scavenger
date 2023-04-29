@@ -3,6 +3,7 @@ import sys
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributions import Distribution, Gamma, Poisson
 import numpy as np
 
 VAR_EPS = 1e-4
@@ -20,6 +21,7 @@ def default_size(x, in_dim, out_dim):
 
 def in_outs(data_dim, out_dim, hidden_dims=[-1, -1]):
     hidden_empty = not hidden_dims
+
     def def_size(x):
         return default_size(x, data_dim, out_dim)
     first_out = def_size(hidden_dims[0] if not hidden_empty else out_dim)
@@ -153,6 +155,13 @@ def log_likelihood_zinb(x, mu, theta, scale, zi_logits):
     return mul_case_zero + mul_case_nonzero
 
 
+def _gamma(theta, mu):
+    # concentration = theta
+    # rate = theta / mu
+    # Important remark: Gamma is parametrized by the rate = 1/scale!
+    return Gamma(concentration=theta, rate=theta/mu)
+
+
 class ZINB:
     def __init__(self, mu, theta, scale, zi_logits=None):
         self.mu = mu
@@ -162,6 +171,31 @@ class ZINB:
 
     def log_prob(self, x):
         return log_likelihood_zinb(x, mu=self.mu, theta=self.theta, scale=self.scale, zi_logits=self.zi_logits)
+
+    def mean(self):
+        if self.zi_logits is None:
+            return self.mu
+        return self.mu * self.zi_probs()
+
+    def zi_probs(self):
+        sigmoid_logits = F.sigmoid(self.zi_logits)
+        return F.softmax(sigmoid_logits, dim=-1)
+
+    def variance(self):
+        mean = self.mu
+
+    # Only for NB currently
+    def sample(self, shape=None):
+        sample_shape = shape or torch.Size()
+        gamma_d = Gamma(concentration=self.theta, rate=self.theta/self.mu)
+        p_means = gamma_d.sample(sample_shape)
+        counts = Poisson(
+            torch.clamp(p_means, max=1e8)
+        ).sample()  # Shape : (n_samples, n_cells_batch, n_vars)
+        if self.zi_logits is not None:
+            is_zero = torch.rand_like(samp) <= self.zi_probs()
+            counts = torch.where(is_zero, 0.0, counts)
+        return counts
 
 
 def tril2full_and_nonneg(tril, dim, nonneg_function=F.softplus):
@@ -263,7 +297,6 @@ class NBVAE(nn.Module):
         latent = self.encoder(x)
         meanvar = self.meanvar_encoder(latent)
         mu = meanvar[:, :self.latent_dim]
-        full_cov = None
         if self.full_cov:
             full_cov = tril2full_and_nonneg(F.softplus(
                 meanvar[:, self.latent_dim:]), self.latent_dim, self.nonneg_function)
@@ -290,6 +323,7 @@ class NBVAE(nn.Module):
             # kl_loss = -log_p_z + log_q_z
             # https://arxiv.org/pdf/1906.02691.pdf, page 29
         else:
+            full_cov = None
             var = self.nonneg_function(meanvar[:, self.latent_dim:])
             logvar = var.log()
             std = (logvar * 0.5).exp() + VAR_EPS

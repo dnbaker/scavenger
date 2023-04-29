@@ -615,7 +615,7 @@ pub trait Variance {
 impl Variance for ZINB {
     fn variance(&self) -> Tensor {
         let mean = self.mean();
-        (&mean + (1. + &mean)) / &self.theta
+        (&mean * (1. + &mean)) / &self.theta
         // not strictly correct for the zero-inflated case,
         // but I don't have math for it and it's probably not an issue
     }
@@ -626,7 +626,7 @@ impl Mean for ZINB {
         if self.zi_logits.numel() == 0 {
             self.mu.shallow_clone()
         } else {
-            let zi_probs = self.zi_logits.softmax(-1, self.zi_logits.kind());
+            let zi_probs = self.zi_logits.sigmoid().softmax(-1, self.zi_logits.kind());
             &self.mu * zi_probs
         }
     }
