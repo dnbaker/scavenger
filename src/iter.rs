@@ -141,7 +141,7 @@ impl CSRMatrix {
     }
     pub fn extract_range_indexput(&self, range: Range<i64>) -> Tensor {
         let numrows = range.end - range.start;
-        let indptr: Vec<i64> = Vec::<i64>::from(self.indptr.i(range.clone()));
+        let indptr: Vec<i64> = Vec::<i64>::try_from(&self.indptr.i(range.clone())).unwrap();
         let mut mat = Tensor::zeros(&[numrows, self.shape[1]], (self.kind, self.data.device()));
         for (row_idx, slice) in indptr.windows(2).enumerate() {
             log::debug!("row {} and slice {:?}", row_idx, slice);
@@ -171,7 +171,7 @@ impl CSRMatrix {
     }
     pub fn extract_range(&self, range: Range<i64>) -> Tensor {
         let numrows = range.end - range.start;
-        let indptr: Vec<i64> = Vec::<i64>::from(self.indptr.i(range.clone()));
+        let indptr: Vec<i64> = Vec::<i64>::try_from(&self.indptr.i(range.clone())).unwrap();
         /*
         let indptr_start = *indptr.first().unwrap();
         let indptr_stop = *indptr.last().unwrap();
@@ -314,12 +314,12 @@ pub mod tests {
     #[test]
     fn test_csr_index_put() {
         const NNZ: i64 = 25;
-        let indices = (0i64..nnz).collect::<Vec<i64>>();
+        let indices = (0i64..NNZ).collect::<Vec<i64>>();
         let indptr = (0..6).map(|x| x * 5).collect::<Vec<i32>>();
         let nrows = 5;
         let ncols = 1000;
         let csrmat = CSRMatrix {
-            data: tch::Tensor::randn(&[nnz], (Kind::Float, Device::Cpu)),
+            data: tch::Tensor::randn(&[NNZ], (Kind::Float, Device::Cpu)),
             indices: tch::Tensor::of_slice(&indices[..]),
             indptr: tch::Tensor::of_slice(&indptr[..]),
             shape: vec![nrows, ncols],

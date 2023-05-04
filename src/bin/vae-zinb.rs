@@ -2,7 +2,7 @@ use clap::Parser;
 use rust_scvi::iter::Iter;
 use rust_scvi::nnutil::{self, *};
 use std::collections::{BTreeSet, HashMap};
-use tch::{self, nn, nn::ModuleT, nn::OptimizerConfig, *};
+use tch::{self, nn, nn::ModuleT, nn::OptimizerConfig, Kind, TchError, Tensor};
 
 fn load_data(source: std::path::PathBuf) -> HashMap<String, Tensor> {
     let tensors = tch::Tensor::read_npz(source).unwrap();
@@ -191,7 +191,7 @@ fn main() -> Result<(), TchError> {
     ))
     .unwrap();
     let mut closure = |input: &[Tensor]| vec![vae.forward_t(&input[0], false)];
-    let model = CModule::create_by_tracing(
+    let model = tch::CModule::create_by_tracing(
         "NBVAE",
         "forward",
         &[Tensor::zeros(&[data_dim], (Kind::Float, device))],

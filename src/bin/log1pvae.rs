@@ -2,7 +2,7 @@ use clap::Parser;
 use rust_scvi::iter::Iter;
 use rust_scvi::nnutil::*;
 use std::collections::HashMap;
-use tch::{self, nn, nn::ModuleT, nn::OptimizerConfig, *};
+use tch::{self, nn, nn::ModuleT, nn::OptimizerConfig, Kind, Tensor};
 
 #[derive(Parser)]
 #[clap(author, version, about)]
@@ -31,7 +31,7 @@ fn sample(input: &Tensor) -> (Tensor, Tensor, Tensor) {
     (&mu + eps * std, mu, logvar)
 }
 
-fn main() -> Result<(), TchError> {
+fn main() -> Result<(), tch::TchError> {
     let settings = Settings::parse();
     let data = load_data();
     println!("Hello, world!");

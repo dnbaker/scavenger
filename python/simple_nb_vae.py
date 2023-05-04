@@ -182,9 +182,10 @@ class ZINB:
         return F.softmax(sigmoid_logits, dim=-1)
 
     def variance(self):
-        mean = self.mu
+        # Perhaps not correct for zi case, but this isn't important.
+        mean = self.mean()
+        return mean + (mean**2) / self.theta
 
-    # Only for NB currently
     def sample(self, shape=None):
         sample_shape = shape or torch.Size()
         gamma_d = Gamma(concentration=self.theta, rate=self.theta/self.mu)
