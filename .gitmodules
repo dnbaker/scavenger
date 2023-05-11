@@ -1,0 +1,3 @@
+[submodule "spatial-data"]
+	path = spatial-data
+	url = https://github.com/atuldeshpande/SpaceMarkers-paper

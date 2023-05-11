@@ -340,11 +340,6 @@ class NBVAE(nn.Module):
             full_cov = full_cov.reshape(full_cov.shape[0], -1)
         return latent_outputs, losses, decoded, full_cov
 
-    '''
-    def __call__(self, *args, **kwargs):
-        return super().__call__(*args, **kwargs)
-    '''
-
     def forward(self, x):
         latent, losses, data, full_cov = self.run(x)
         kl_loss, recon_loss = losses
