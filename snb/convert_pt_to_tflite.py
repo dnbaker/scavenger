@@ -36,8 +36,16 @@ def pt_to_tflite(pt_path, input_shape, out_path=None):
         out_path = pt_path.replace(".pt", ".tflite")
     model = torch.load(pt_path)
     onnx_path = pt_path.replace(".pt", ".onnx")
-    torch.onnx.export(model, torch.randn(input_shape), onnx_path)
+    torch.onnx.export(model, torch.randn((1, input_shape)), onnx_path)
+    print(f"onnx: {onnx_path}", file=sys.stderr)
     tf_path = onnx_path.replace(".onnx", ".tf")
+    print(f"tf: {tf_path}", file=sys.stderr)
     onnx_to_tf(onnx_path=onnx_path, tf_path=tf_path)
+    print(f"tflite: {out_path}", file=sys.stderr)
     tf_to_tf_lite(tf_path, out_path)
+    print("done", file=sys.stderr)
     return [onnx_path, tf_path, out_path]
+
+if __name__ == '__main__':
+    path = "/Users/dnb13/Desktop/code/rust-scvi/snb/weights/nbvae.32.200,128,64.full_cov.3.pt"
+    pt_to_tflite(path, 32738)

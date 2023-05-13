@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 import scipy.sparse as sp
 
-import simple_nb_vae
+from snb import simple_nb_vae
 
 from argparse import ArgumentParser as AP
 
@@ -70,6 +70,20 @@ hidden_dims = hidden
 model = simple_nb_vae.NBVAE(data_dim=mat.shape[1], latent_dim=latent_dim,
                             hidden_dim=hidden_dims, full_cov=args.full_cov, zero_inflate=args.zero_inflate)
 print(model)
+f16 = None
+if args.compile:
+    f16 = torch.from_numpy(mat[:37, :].todense().astype(np.float32))
+    module = torch.jit.trace(model, f16, check_trace=False)
+    traced_module = module
+    import datetime
+    s = str(datetime.datetime.now()).replace(" ", "_")
+    traced_module.save(f"__tracedmodule.{s}.pytorch_jit.pt")
+
+    module = torch.compile(model)
+    torch.save(module, f"__tracedmodule.{s}.pytorch_opt.pt")
+    torch.manual_seed(0)
+    out_compile = module(f16)
+    assert torch.allclose(out_orig, out_compile)
 '''
 out = model(f16)
 # print("out:", out.shape)
@@ -98,6 +112,7 @@ for epoch_id in range(args.epochs):
         end = start + args.batch_size
         idxtouse = randperm[start:end]
         submatrix = torch.from_numpy(mat[idxtouse].todense().astype(np.float32))
+        print("submat shape", submatrix.shape)
         unpacked_out = model.unpack(model(submatrix))
         latent, losses, zinb = unpacked_out
         model_loss, recon_loss = losses
@@ -145,7 +160,8 @@ for epoch_id in range(args.epochs):
 
 model.eval()
 
-f16 = torch.from_numpy(mat[:37, :].todense().astype(np.float32))
+if f16 is None:
+    f16 = torch.from_numpy(mat[:37, :].todense().astype(np.float32))
 module = torch.jit.trace(model, f16, check_trace=False)
 traced_module = module
 orig_module = model
