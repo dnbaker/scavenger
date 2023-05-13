@@ -155,11 +155,6 @@ def log_likelihood_zinb(x, mu, theta, scale, zi_logits):
     return mul_case_zero + mul_case_nonzero
 
 
-def _gamma(theta, mu):
-    # concentration = theta
-    # rate = theta / mu
-    # Important remark: Gamma is parametrized by the rate = 1/scale!
-    return Gamma(concentration=theta, rate=theta/mu)
 
 
 class ZINB:
@@ -184,15 +179,19 @@ class ZINB:
     def variance(self):
         # Perhaps not correct for zi case, but this isn't important.
         mean = self.mean()
-        return mean + (mean**2) / self.theta
+        return mean + (torch.square(mean)) / self.theta
 
     def sample(self, shape=None):
+        # concentration = theta
+        # rate = theta / mu
+        # Important remark: Gamma is parametrized by the rate = 1/scale!
         sample_shape = shape or torch.Size()
         gamma_d = Gamma(concentration=self.theta, rate=self.theta/self.mu)
         p_means = gamma_d.sample(sample_shape)
         counts = Poisson(
             torch.clamp(p_means, max=1e8)
-        ).sample()  # Shape : (n_samples, n_cells_batch, n_vars)
+        ).sample()
+        # (Sample, Batch, Dim)
         if self.zi_logits is not None:
             is_zero = torch.rand_like(samp) <= self.zi_probs()
             counts = torch.where(is_zero, 0.0, counts)
