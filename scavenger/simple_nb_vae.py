@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch.distributions import Distribution, Gamma, Poisson
 import numpy as np
 
-from .components import nchoose2, default_size, in_outs, ULayerSet, LayerSet
+from scavenger.components import nchoose2, default_size, in_outs, ULayerSet, LayerSet
 
 VAR_EPS = 1e-4
 
@@ -123,7 +123,7 @@ def tril2full_and_nonneg(tril, dim, nonneg_function=F.softplus):
 #    kl divergence loss -> make this fit the latent space model
 
 class NBVAE(nn.Module):
-    def __init__(self, data_dim, latent_dim, *, hidden_dim=128, linear_settings={}, zero_inflate=False, full_cov=None, categorical_classes=[], expand_mul=4, nonneg_function=F.softplus):
+    def __init__(self, data_dim, latent_dim, *, hidden_dim=128, linear_settings={}, zero_inflate=False, full_cov=None, categorical_class_sizes=[], expand_mul=4, nonneg_function=F.softplus):
         super().__init__()
         self.current_seed = 0
         self.data_dim = data_dim
@@ -159,13 +159,19 @@ class NBVAE(nn.Module):
         self.meanvar_encoder = ULayerSet(latent_dim, meanvar_out, hidden_dims=[
                                          latent_dim * expand_mul], skip_last_activation=True)
 
-    def num_cov_variables(self):
+        self.categorical_class_sizes = categorical_class_sizes
+        num_classes = sum(categorical_class_sizes)
+        # Give the classification projection the latent representation as well as the last layer's values
+        self.class_proj = nn.Linear(last_layer_dim + self.latent_dim, sum(categorical_class_sizes)) if num_classes else None
+
+
+    def num_covariance_parameters_variables(self):
         return nchoose2(self.latent_dim) + self.latent_dim
 
     def num_latent_gaussian_parameters(self):
         if not self.full_cov:
             return self.latent_dim * 2
-        num_covar = self.num_cov_variables()
+        num_covar = self.num_covariance_parameters_variables()
         num_mean = self.latent_dim
         return num_covar + num_mean
 
@@ -187,7 +193,17 @@ class NBVAE(nn.Module):
         scale = F.softplus(output_chunked[1])
         r = output_chunked[0].exp()
         px_rate = library_size * scale
-        return ZINB(scale=scale, theta=r, mu=px_rate, zi_logits=dropout)
+
+        # Logits for classification
+        if hasattr(self, 'class_proj') and self.class_proj is not None:
+            classification_logits = self.class_proj(torch.cat([px, latent]))
+            idx = 0
+            for size in self.categorical_class_sizes:
+                classification_logits[:,idx:idx + size] = F.binary_cross_entropy_with_logits(classification_logits[:,idx:idx + size], reduction='none')
+                idx += size
+        else:
+            classification_logits = None
+        return {"model": ZINB(scale=scale, theta=r, mu=px_rate, zi_logits=dropout), "classification_loss": classification_logits}
 
     def run(self, x):
         latent = self.encoder(x)
@@ -229,15 +245,23 @@ class NBVAE(nn.Module):
         latent_outputs = (gen, mu, logvar)
         library_size = x.sum(dim=[1]).unsqueeze(1)
         decoded = self.decode(gen, library_size)
+        classification_loss = decoded['classification_loss']
+        decoded = decoded['model']
         nb_recon_loss = -decoded.log_prob(x)
         losses = (kl_loss, nb_recon_loss)
+        if classification_loss is not None:
+            losses = tuple(list(losses) + [classification_loss])
         if full_cov is not None:
             full_cov = full_cov.reshape(full_cov.shape[0], -1)
         return latent_outputs, losses, decoded, full_cov
 
     def forward(self, x):
         latent, losses, data, full_cov = self.run(x)
-        kl_loss, recon_loss = losses
+        classification_loss = losses[2:]
+        if len(classification_loss) == 0:
+            classification_loss = None
+        kl_loss, recon_loss = losses[:2]
+        class_loss = losses[2] if len(losses) >= 3 else None
         packed_inputs = list(latent) + [kl_loss]
         if full_cov is not None:
             packed_inputs.append(full_cov)

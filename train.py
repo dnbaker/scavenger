@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 import scipy.sparse as sp
 
-from snb import simple_nb_vae
+from scavenger import simple_nb_vae
 
 from argparse import ArgumentParser as AP
 
@@ -129,6 +129,7 @@ for epoch_id in range(args.epochs):
             backprop_count = 0
             opt.zero_grad()
             print(f"{batch_id}/{num_batches} at {epoch_id} has mean loss {loss.mean().item()}", file=sys.stderr)
+        break
     if backprop_count > 0:
         loss.sum().backward()
         opt.step()

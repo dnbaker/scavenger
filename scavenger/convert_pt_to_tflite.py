@@ -1,7 +1,6 @@
+import sys
+
 import torch
-import tensorflow_probability
-import onnx_tf
-import onnx
 
 def tf_to_tf_lite(tf_path, tf_lite_path):
     """
@@ -18,6 +17,8 @@ def tf_to_tf_lite(tf_path, tf_lite_path):
 
 
 def onnx_to_tf(onnx_path, tf_path):
+    import onnx_tf
+    import onnx
     """
     From pytorch_to_tflite, but it won't install.
 
@@ -47,5 +48,5 @@ def pt_to_tflite(pt_path, input_shape, out_path=None):
     return [onnx_path, tf_path, out_path]
 
 if __name__ == '__main__':
-    path = "/Users/dnb13/Desktop/code/rust-scvi/snb/weights/nbvae.32.200,128,64.full_cov.3.pt"
+    path = sys.argv[1] if sys.argv[1:] else "/Users/dnb13/Desktop/code/rust-scvi/scavenger/nbvae.256.384.full_cov.1.jit.pt"
     pt_to_tflite(path, 32738)
