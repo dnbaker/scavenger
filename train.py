@@ -26,6 +26,18 @@ ap.add_argument("--subsample-rows", type=float, default=1.)
 ap.add_argument("--add-log1p-l2-recon-loss", action='store_true')
 ap.add_argument("--compile", action='store_true')
 ap.add_argument("--gradientfreq", '-G', type=int, help="Number of batches between calling backward.", default=1)
+ap.add_argument("--class-loss-ratio", type=float, default=0.)
+ap.add_argument("--save-epoch-models", action='store_true')
+
+args = ap.parse_args()
+args.full_cov = not args.no_full_cov
+
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
+
+covstr = "full_cov" if args.full_cov else "diag_cov"
+zi = ".zi" if args.zero_inflate else ""
+
+settings = args
 
 args = ap.parse_args()
 args.full_cov = not args.no_full_cov
@@ -114,9 +126,15 @@ for epoch_id in range(args.epochs):
         submatrix = torch.from_numpy(mat[idxtouse].todense().astype(np.float32))
         print("submat shape", submatrix.shape)
         unpacked_out = model.unpack(model(submatrix))
-        latent, losses, zinb = unpacked_out
-        model_loss, recon_loss = losses
+        latent, losses, zinb, class_info = unpacked_out
+        model_loss, recon_loss = losses[:2]
+        if len(losses) > 2 and losses[2] is not None:
+            class_logits, class_loss = losses[2]
+        else:
+            class_logits, class_loss = None, None
         loss = model_loss.sum(axis=1) + recon_loss.sum(axis=1)
+        if class_loss is not None:
+            loss += class_loss.sum(axis=1)
         if args.add_log1p_l2_recon_loss:
             sampled = zinb.sample()
             lsampled = torch.log1p(sampled)
@@ -142,21 +160,28 @@ for epoch_id in range(args.epochs):
                         args.batch_size - 1) // args.batch_size
     model_test_loss = None
     recon_test_loss = None
+    class_test_loss = None
     for batch_id in range(num_test_batches):
         start = batch_id * args.batch_size
         end = start + args.batch_size
         submatrix = torch.from_numpy(mat[start:end, :].todense().astype(np.float32))
-        latent, losses, zinb = model.unpack(model(submatrix))
-        model_loss, recon_loss = losses
+        latent, losses, zinb, class_info = model.unpack(model(submatrix))
+        model_loss, recon_loss = losses[:2]
+        class_loss = losses[2] if len(losses) > 2 else None
         if model_test_loss is None:
             model_test_loss = model_loss.sum(-1)
             recon_test_loss = recon_loss.sum(-1)
+            if class_loss is not None:
+                class_test_loss = class_loss.sum(-1)
             continue
         model_test_loss += model_loss.sum(-1)
         recon_test_loss += recon_loss.sum(-1)
+        if class_loss is not None:
+            class_test_loss += class_loss.sum(-1)
     print(f"[After epoch {epoch_id + 1} - Mean test loss: {model_test_loss.mean().item()} for model fit, {recon_test_loss.mean().item()} for reconstruction.", file=sys.stderr)
-    torch.save(
-        model, f"nbvae.{latent_dim}.{hidden_dims}.{covstr}.{epoch_id}of{args.epochs}{zi}.pt")
+    if args.save_epoch_models:
+        torch.save(
+            model, f"nbvae.{latent_dim}.{hidden_dims}.{covstr}.{epoch_id}of{args.epochs}{zi}.pt")
 
 
 model.eval()

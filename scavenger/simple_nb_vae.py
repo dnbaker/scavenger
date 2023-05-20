@@ -162,6 +162,7 @@ class NBVAE(nn.Module):
         self.categorical_class_sizes = categorical_class_sizes
         num_classes = sum(categorical_class_sizes)
         # Give the classification projection the latent representation as well as the last layer's values
+        # Could use an MLP, but I think it's better to make it linear since it's interpretable
         self.class_proj = nn.Linear(last_layer_dim + self.latent_dim, sum(categorical_class_sizes)) if num_classes else None
 
 
@@ -197,13 +198,13 @@ class NBVAE(nn.Module):
         # Logits for classification
         if hasattr(self, 'class_proj') and self.class_proj is not None:
             classification_logits = self.class_proj(torch.cat([px, latent]))
-            idx = 0
-            for size in self.categorical_class_sizes:
-                classification_logits[:,idx:idx + size] = F.binary_cross_entropy_with_logits(classification_logits[:,idx:idx + size], reduction='none')
-                idx += size
+            classification_loss = F.binary_cross_entropy_with_logits(classification_logits, reduction='none')
         else:
             classification_logits = None
-        return {"model": ZINB(scale=scale, theta=r, mu=px_rate, zi_logits=dropout), "classification_loss": classification_logits}
+            classification_loss = None
+        return {"model": ZINB(scale=scale, theta=r, mu=px_rate, zi_logits=dropout),
+                "classification_loss": classification_loss,
+                "classification_logits": classification_logits}
 
     def run(self, x):
         latent = self.encoder(x)
@@ -246,6 +247,7 @@ class NBVAE(nn.Module):
         library_size = x.sum(dim=[1]).unsqueeze(1)
         decoded = self.decode(gen, library_size)
         classification_loss = decoded['classification_loss']
+        class_info = {x: decoded.get(x) for x in ('classification_loss', 'classification_logits')}
         decoded = decoded['model']
         nb_recon_loss = -decoded.log_prob(x)
         losses = (kl_loss, nb_recon_loss)
@@ -253,10 +255,10 @@ class NBVAE(nn.Module):
             losses = tuple(list(losses) + [classification_loss])
         if full_cov is not None:
             full_cov = full_cov.reshape(full_cov.shape[0], -1)
-        return latent_outputs, losses, decoded, full_cov
+        return latent_outputs, losses, decoded, full_cov, class_info
 
     def forward(self, x):
-        latent, losses, data, full_cov = self.run(x)
+        latent, losses, data, full_cov, class_info = self.run(x)
         classification_loss = losses[2:]
         if len(classification_loss) == 0:
             classification_loss = None
@@ -265,6 +267,11 @@ class NBVAE(nn.Module):
         packed_inputs = list(latent) + [kl_loss]
         if full_cov is not None:
             packed_inputs.append(full_cov)
+        classification_logits = class_info.get('classification_logits')
+        if classification_loss is not None:
+            packed_inputs.append(classification_loss)
+            assert classification_logits is not None
+            packed_inputs.append(classification_logits)
         packed_inputs += list(losses)
         packed_inputs += [data.mu, data.theta, data.scale]
         if self.zero_inflate:
@@ -280,6 +287,8 @@ class NBVAE(nn.Module):
         end_of_latent_without_cov = self.latent_dim * 5
         end_of_latent = end_of_latent_without_cov + \
             (self.latent_dim ** 2 if self.full_cov else 0)
+        start_of_class = end_of_latent
+        end_of_class = end_of_latent + sum(self.categorical_class_sizes) * 2
         latent_data = packed_result[:, :end_of_latent]
         latent, gen, mu, logvar, kl_loss = latent_data[:, :end_of_latent_without_cov].chunk(
             5, -1)
@@ -290,20 +299,32 @@ class NBVAE(nn.Module):
             full_cov = remaining[:, :]
             assert full_cov.shape[1] == self.latent_dim ** 2, f"{self.latent_dim**2} vs {full_cov.shape}"
             assert kl_loss.shape[1] == self.latent_dim, f"{kl_loss.shape}, vs latent {self.latent_dim}"
+        class_data = packed_result[:,start_of_class:end_of_class] if self.categorical_class_sizes else None
+        if class_data is not None:
+            class_loss, class_logits =  class_data.chunk(2, -1)
+        else:
+            class_loss = None
+            class_logits = None
         n_data_chunks = 4 + self.zero_inflate
-        full_data = packed_result[:, end_of_latent:].chunk(n_data_chunks, -1)
+        full_data = packed_result[:, end_of_class:].chunk(n_data_chunks, -1)
         (nb_recon_loss, mu, theta, scale) = full_data[:4]
         zi_logits = full_data[4] if self.zero_inflate else None
         # print([x.shape for x in (latent, gen, mu, logvar, kl_loss)], "latent")
         # print([x.shape for x in (nb_recon_loss, scale, mu, theta)],
         #      "data: recon, scale, mu, theta")
-        return ((latent, gen, mu, logvar), (kl_loss, nb_recon_loss), ZINB(scale=scale, mu=mu, theta=theta, zi_logits=zi_logits))
+        losses = (kl_loss, nb_recon_loss)
+        if class_loss is not None:
+            losses = kl_loss + (class_loss,)
+        return ((latent, gen, mu, logvar), losses, ZINB(scale=scale, mu=mu, theta=theta, zi_logits=zi_logits), (class_logits, class_loss) if class_logits is not None else None)
 
     def labeled_unpack(self, unpacked_result):
         if not isinstance(unpacked_result, tuple):
             unpacked_result = self.unpack(unpacked_result)
-        latent, losses, dist = unpacked_result
-        return {"latent": {"sampled": latent[0], "mu": latent[1], "logvar": latent[2]}, "loss": {"kl": losses[0], "recon": losses[1]}, "dist": dist}
+        latent, losses, dist, class_info = unpacked_result
+        ret = {"latent": {"sampled": latent[0], "mu": latent[1], "logvar": latent[2]}, "loss": {"kl": losses[0], "recon": losses[1]}, "dist": dist, "class": class_info}
+        if len(losses) > 2:
+            ret['loss']['class'] = losses[2]
+        return ret
 
 
 class UNetDiscriminator(nn.Module):
