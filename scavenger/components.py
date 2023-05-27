@@ -5,7 +5,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-
 def nchoose2(x):
     return (x * (x - 1)) // 2
 
@@ -74,6 +73,7 @@ class ULayerSet(nn.Module):
 
     def forward(self, x):
         return self.layers.forward(x)
+
 
 class LayerSet(nn.Module):
     def __init__(self, data_dim, out_dim, hidden_dim=128, n_layers=3, batch_norm=False, layer_norm=True, dropout=0.1):

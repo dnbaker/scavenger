@@ -140,21 +140,23 @@ class NBVAE(nn.Module):
         enc_dropout = linear_settings.get("dropout", 0.1)
         dec_dropout = linear_settings.get(
             "dropout", linear_settings.get("decoder_dropout", 0.0))
+        num_classes = sum(categorical_class_sizes)
+        num_in_features = data_dim + num_classes
         if isinstance(hidden_dim, int):
-            self.encoder = LayerSet(data_dim, out_dim=latent_dim, n_layers=n_layers, hidden_dim=hidden_dim,
+            self.encoder = LayerSet(num_in_features, out_dim=latent_dim, n_layers=n_layers, hidden_dim=hidden_dim,
                                     batch_norm=batch_norm, layer_norm=layer_norm, dropout=enc_dropout)
             self.decoder = LayerSet(latent_dim, out_dim=hidden_dim, n_layers=n_layers, hidden_dim=hidden_dim,
                                     batch_norm=batch_norm, layer_norm=layer_norm, dropout=dec_dropout)
             last_layer_dim = hidden_dim
         else:
-            self.encoder = ULayerSet(data_dim, out_dim=latent_dim, hidden_dims=hidden_dim,
+            self.encoder = ULayerSet(num_in_features, out_dim=latent_dim, hidden_dims=hidden_dim,
                                      batch_norm=batch_norm, layer_norm=layer_norm, dropout=enc_dropout)
             last_layer_dim = hidden_dim[0] if hidden_dim[0] > 0 else int(
-                np.ceil(data_dim / np.sqrt(data_dim / latent_dim)))
+                np.ceil(num_in_features / np.sqrt(num_in_features / latent_dim)))
             self.decoder = ULayerSet(latent_dim, out_dim=last_layer_dim, hidden_dims=hidden_dim[::-1],
                                      batch_norm=batch_norm, layer_norm=layer_norm, dropout=dec_dropout)
         self.px_r_scale_dropout_decoder = nn.Linear(
-            last_layer_dim, data_dim * self.dim_mul())
+            last_layer_dim, num_in_features * self.dim_mul())
         meanvar_out = self.num_latent_gaussian_parameters()
         self.meanvar_encoder = ULayerSet(latent_dim, meanvar_out, hidden_dims=[
                                          latent_dim * expand_mul], skip_last_activation=True)
@@ -197,13 +199,14 @@ class NBVAE(nn.Module):
 
         # Logits for classification
         if hasattr(self, 'class_proj') and self.class_proj is not None:
-            classification_logits = self.class_proj(torch.cat([px, latent]))
-            classification_loss = F.binary_cross_entropy_with_logits(classification_logits, reduction='none')
+            # print(px.shape, "px", latent.shape, "px", self.class_proj)
+            classification_logits = self.class_proj(torch.cat([px, latent], axis=1))
+            # classification_loss = F.binary_cross_entropy_with_logits(classification_logits, reduction='none')
         else:
             classification_logits = None
-            classification_loss = None
+            # classification_loss = None
         return {"model": ZINB(scale=scale, theta=r, mu=px_rate, zi_logits=dropout),
-                "classification_loss": classification_loss,
+                # "classification_loss": classification_loss,
                 "classification_logits": classification_logits}
 
     def run(self, x):
@@ -246,24 +249,47 @@ class NBVAE(nn.Module):
         latent_outputs = (gen, mu, logvar)
         library_size = x.sum(dim=[1]).unsqueeze(1)
         decoded = self.decode(gen, library_size)
-        classification_loss = decoded['classification_loss']
-        class_info = {x: decoded.get(x) for x in ('classification_loss', 'classification_logits')}
+        class_info = {x: decoded.get(x) for x in ('classification_loss', 'classification_logits') if x in decoded}
         decoded = decoded['model']
         nb_recon_loss = -decoded.log_prob(x)
         losses = (kl_loss, nb_recon_loss)
-        if classification_loss is not None:
-            losses = tuple(list(losses) + [classification_loss])
         if full_cov is not None:
             full_cov = full_cov.reshape(full_cov.shape[0], -1)
         return latent_outputs, losses, decoded, full_cov, class_info
 
-    def forward(self, x):
+    def forward(self, x, categorical_labels=None):
+        ## Preprocess cats
+        assert categorical_labels is None or len(categorical_labels) == len(self.categorical_class_sizes)
+        num_cats = sum(self.categorical_class_sizes)
+        def process_label_set(ls, num_labels):
+            if isinstance(ls, np.ndarray):
+                ls = torch.from_numpy(ls)
+            if ls.dtype is torch.long:
+                ls = torch.nn.functional.one_hot(ls, num_labels)
+            ls = ls.to(x.dtype)
+            return ls
+        if categorical_labels is not None:
+            label_inputs = [process_label_set(labels, num_labels) for labels, num_labels in zip(categorical_labels, self.categorical_class_sizes)]
+            # print("shape before cat labels: ", [x.shape for x in label_inputs])
+        elif num_cats > 0:
+            # If categorical labels are not present, just leave as 0
+            label_inputs = [torch.zeros((x.shape[0], num_cats), dtype=x.dtype)]
+            # print("shape before zeroed labels: ", [x.shape for x in label_inputs])
+        else:
+            label_inputs = None
+        if label_inputs is not None:
+            #print("x shape before labels: ", x.shape)
+            x = torch.cat([x] + label_inputs, axis=1)
+            #print("x shape after labels: ", x.shape)
+
+        ## Run network
         latent, losses, data, full_cov, class_info = self.run(x)
-        classification_loss = losses[2:]
-        if len(classification_loss) == 0:
+        if 'classification_logits' in class_info:
+            cat_labels = torch.cat(label_inputs, axis=1)
+            classification_loss = F.binary_cross_entropy_with_logits(class_info['classification_logits'], cat_labels, reduction='none')
+        else:
             classification_loss = None
         kl_loss, recon_loss = losses[:2]
-        class_loss = losses[2] if len(losses) >= 3 else None
         packed_inputs = list(latent) + [kl_loss]
         if full_cov is not None:
             packed_inputs.append(full_cov)
@@ -292,11 +318,8 @@ class NBVAE(nn.Module):
         latent_data = packed_result[:, :end_of_latent]
         latent, gen, mu, logvar, kl_loss = latent_data[:, :end_of_latent_without_cov].chunk(
             5, -1)
-        if self.full_cov:
-            remaining = latent_data[:, end_of_latent_without_cov:]
-            # print(
-            #    f"Remaining: {remaining.shape}. numcov: {self.num_cov_variables()}")
-            full_cov = remaining[:, :]
+        full_cov = latent_data[:, end_of_latent_without_cov:] if self.full_cov else None
+        if full_cov is not None:
             assert full_cov.shape[1] == self.latent_dim ** 2, f"{self.latent_dim**2} vs {full_cov.shape}"
             assert kl_loss.shape[1] == self.latent_dim, f"{kl_loss.shape}, vs latent {self.latent_dim}"
         class_data = packed_result[:,start_of_class:end_of_class] if self.categorical_class_sizes else None
@@ -314,16 +337,18 @@ class NBVAE(nn.Module):
         #      "data: recon, scale, mu, theta")
         losses = (kl_loss, nb_recon_loss)
         if class_loss is not None:
-            losses = kl_loss + (class_loss,)
-        return ((latent, gen, mu, logvar), losses, ZINB(scale=scale, mu=mu, theta=theta, zi_logits=zi_logits), (class_logits, class_loss) if class_logits is not None else None)
+            losses = losses + (class_loss,)
+        return ((latent, gen, mu, logvar, full_cov), losses, ZINB(scale=scale, mu=mu, theta=theta, zi_logits=zi_logits), (class_logits, class_loss) if class_logits is not None else None)
 
     def labeled_unpack(self, unpacked_result):
         if not isinstance(unpacked_result, tuple):
             unpacked_result = self.unpack(unpacked_result)
         latent, losses, dist, class_info = unpacked_result
-        ret = {"latent": {"sampled": latent[0], "mu": latent[1], "logvar": latent[2]}, "loss": {"kl": losses[0], "recon": losses[1]}, "dist": dist, "class": class_info}
+        ret = {"latent": {"centroid": latent[0], "sampled": latent[1], "mu": latent[2], "logvar": latent[3]}, "loss": {"kl": losses[0], "recon": losses[1]}, "dist": dist, "class": class_info}
         if len(losses) > 2:
             ret['loss']['class'] = losses[2]
+        if len(latent > 4):
+            ret["latent"]["full_cov"] = latent[4]
         return ret
 
 
