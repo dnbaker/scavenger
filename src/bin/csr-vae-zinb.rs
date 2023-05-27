@@ -1,8 +1,8 @@
 use clap::Parser;
-use rust_scvi::iter::Iter;
+use rust_scvi::iter::{CSRMatrix, IterCSR};
 use rust_scvi::nnutil::{self, *};
 use std::collections::{BTreeSet, HashMap};
-use tch::{self, nn, nn::ModuleT, nn::OptimizerConfig, Kind, TchError, Tensor};
+use tch::{self, nn, nn::ModuleT, nn::OptimizerConfig, Kind, Tensor};
 
 fn load_data(source: std::path::PathBuf) -> HashMap<String, Tensor> {
     let tensors = tch::Tensor::read_npz(source).unwrap();
@@ -63,15 +63,19 @@ struct Settings {
     pub log1p: bool,
 
     pub data_path: Option<String>,
+
+    #[clap(long, short)]
+    #[clap(default_value = "false")]
+    pub early_termination: bool,
 }
 
-fn main() -> Result<(), TchError> {
+fn main() -> Result<(), tch::TchError> {
     let settings = Settings::parse();
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
         .init();
     let data_path = settings.data_path.unwrap_or(String::from(
-        "/Users/dnb13/Desktop/code/compressed_bundle/PBMC/pbmc.sparse.npz",
+        "/Users/dnb13/Desktop/code/compressed_bundle/PBMC/pbmc.csr.npz",
     ));
     let data = load_data(std::path::PathBuf::from(&data_path[..]));
     let latent_dim = settings.latent_dim;
@@ -80,9 +84,25 @@ fn main() -> Result<(), TchError> {
         .map(|x| x.iter::<i64>().unwrap().collect::<BTreeSet<_>>().len() as i64)
         .unwrap_or(0i64);
     let device = nnutil::best_device_available();
-    let vs = nn::VarStore::new(device);
-    let (data, is_sparse) = (&data["data"], false);
-    let data_dim = data.size2()?.1;
+    let mut vs = nn::VarStore::new(device);
+    let csr_data: Option<CSRMatrix> = match data.get("indptr") {
+        Some(indptr) => Some(CSRMatrix {
+            data: data["data"].shallow_clone().to_kind(Kind::Float),
+            indptr: indptr.shallow_clone(),
+            indices: data["indices"].shallow_clone(),
+            shape: Vec::<i64>::try_from(&data["shape"]).unwrap(),
+            kind: Kind::Float,
+        }),
+        None => None,
+    };
+    if csr_data.is_none() {
+        panic!("Testing csr format");
+    }
+    let csr_data = csr_data.unwrap();
+    let shape = &csr_data.shape[..];
+    let num_rows = shape[0] as i64;
+    let num_cols = shape[1] as i64;
+    let data_dim = num_cols;
     tch::manual_seed(settings.seed);
     let n_layers = settings.n_layers;
     log::info!("Set seed");
@@ -102,15 +122,13 @@ fn main() -> Result<(), TchError> {
         panic!("log1p not supported for this case because lazy");
     }
     let batch_size = settings.batch_size;
-    let num_rows = data.size2()?.0;
-    let num_cols = data.size2()?.1;
     let classifier_layer = nn::linear(
         vs.root() / "classifier",
         latent_dim,
         num_labels,
         Default::default(),
     );
-    eprintln!("Dataset of size {num_rows}/{num_cols}");
+    eprintln!("Dataset of size {num_rows}/{data_dim}");
     let mut opt = nn::Adam::default().build(&vs, 1e-4)?;
     for epoch in 0..settings.num_epochs {
         log::info!("Epoch {epoch}");
@@ -118,16 +136,14 @@ fn main() -> Result<(), TchError> {
         let mut klloss_sum = 0.;
         let mut class_loss_sum = 0.;
         let mut total_samples = 0;
+        /*
         for (batch_index, (bdata, blabels)) in Iter::new(data, labels, batch_size)
             .shuffle_sparse(is_sparse)
+        */
+        for (batch_index, (bdata, blabels)) in IterCSR::new(&csr_data, labels, batch_size)
             .to_device(vs.device())
             .enumerate()
         {
-            let bdata = if is_sparse {
-                bdata.to_dense(tch::Kind::Float)
-            } else {
-                bdata.to_kind(tch::Kind::Float)
-            };
             let current_bs = bdata.size2().unwrap().0 as i32;
             total_samples += current_bs;
             // let bdata = bdata.to_kind(tch::Kind::Float).log1p();
@@ -177,6 +193,9 @@ fn main() -> Result<(), TchError> {
                     (current_kl_loss + current_recon_loss + current_class_loss) / (current_bs as f64),
                 );
             }
+            if settings.early_termination {
+                break;
+            }
         }
         let loss_sum = rloss_sum + klloss_sum + class_loss_sum;
         println!("epoch: {:4} train error: {:5.2}", epoch, loss_sum);
@@ -190,15 +209,17 @@ fn main() -> Result<(), TchError> {
         settings.seed,
     ))
     .unwrap();
+    vs.freeze();
     let mut closure = |input: &[Tensor]| vec![vae.forward_t(&input[0], false)];
     let model = tch::CModule::create_by_tracing(
-        "NBVAE",
+        &format!("{}NBVAE", if settings.zero_inflate { "ZI" } else { "" })[..],
         "forward",
-        &[Tensor::zeros(&[data_dim], (Kind::Float, device))],
+        &[Tensor::randn(&[16, data_dim], (Kind::Float, device))],
         &mut closure,
     )?;
     model.save(format!(
-        "nbvae.epochs{}.hid{}.latent{}.nlayers{}.seed{}.pt",
+        "{}nbvae.epochs{}.hid{}.latent{}.nlayers{}.seed{}.pt",
+        if settings.zero_inflate { "zi" } else { "" },
         settings.num_epochs,
         settings.hidden_dim,
         settings.latent_dim,
@@ -207,33 +228,3 @@ fn main() -> Result<(), TchError> {
     ))?;
     Ok(())
 }
-
-/*
-fn main() -> Result<()> {
-    let m = tch::vision::mnist::load_dir("data")?;
-    let mut vs = nn::VarStore::new(Device::cuda_if_available());
-    let net = Net::new(&vs.root());
-    let mut opt = nn::Adam::default().build(&vs, 1e-4)?;
-    for epoch in 1..10 {
-        for (bimages, blabels) in m.train_iter(256).shuffle().to_device(vs.device()) {
-            let loss = net.forward_t(&bimages, true).cross_entropy_for_logits(&blabels);
-            opt.backward_step(&loss);
-        }
-        let test_accuracy =
-            net.batch_accuracy_for_logits(&m.test_images, &m.test_labels, vs.device(), 1024);
-        println!("epoch: {:4} test acc: {:5.2}%", epoch, 100. * test_accuracy,);
-    }
-
-    vs.freeze();
-    let mut closure = |input: &[Tensor]| vec![net.forward_t(&input[0], false)];
-    let model = CModule::create_by_tracing(
-        "MyModule",
-        "forward",
-        &[Tensor::zeros(&[784], FLOAT_CUDA)],
-        &mut closure,
-    )?;
-    model.save("model.pt")?;
-
-    Ok(())
-}
-*/
