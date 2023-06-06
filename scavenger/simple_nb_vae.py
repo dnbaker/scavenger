@@ -115,6 +115,10 @@ def tril2full_and_nonneg(tril, dim, nonneg_function=F.softplus):
     return unpacked
 
 
+def indptr_labels(labels):
+    return torch.cat((torch.zeros(1, dtype=torch.long), torch.cumsum(torch.from_numpy(np.array(labels, dtype=np.int64)), 0)))
+
+
 # inputs ->
 #  fclayers
 #    latent dim
@@ -140,8 +144,8 @@ class NBVAE(nn.Module):
         enc_dropout = linear_settings.get("dropout", 0.1)
         dec_dropout = linear_settings.get(
             "dropout", linear_settings.get("decoder_dropout", 0.0))
-        num_classes = sum(categorical_class_sizes)
-        num_in_features = data_dim + num_classes
+        self.num_classes = sum(categorical_class_sizes)
+        num_in_features = data_dim + self.num_classes
         if isinstance(hidden_dim, int):
             self.encoder = LayerSet(num_in_features, out_dim=latent_dim, n_layers=n_layers, hidden_dim=hidden_dim,
                                     batch_norm=batch_norm, layer_norm=layer_norm, dropout=enc_dropout)
@@ -162,10 +166,10 @@ class NBVAE(nn.Module):
                                          latent_dim * expand_mul], skip_last_activation=True)
 
         self.categorical_class_sizes = categorical_class_sizes
-        num_classes = sum(categorical_class_sizes)
         # Give the classification projection the latent representation as well as the last layer's values
         # Could use an MLP, but I think it's better to make it linear since it's interpretable
-        self.class_proj = nn.Linear(last_layer_dim + self.latent_dim, sum(categorical_class_sizes)) if num_classes else None
+        self.class_proj = nn.Linear(last_layer_dim + self.latent_dim, sum(categorical_class_sizes)) if self.num_classes else None
+        self.offsets = indptr_labels(self.categorical_class_sizes)
 
 
     def num_covariance_parameters_variables(self):
@@ -201,7 +205,6 @@ class NBVAE(nn.Module):
         if hasattr(self, 'class_proj') and self.class_proj is not None:
             # print(px.shape, "px", latent.shape, "px", self.class_proj)
             classification_logits = self.class_proj(torch.cat([px, latent], axis=1))
-            # classification_loss = F.binary_cross_entropy_with_logits(classification_logits, reduction='none')
         else:
             classification_logits = None
             # classification_loss = None
@@ -284,9 +287,28 @@ class NBVAE(nn.Module):
 
         ## Run network
         latent, losses, data, full_cov, class_info = self.run(x)
-        if 'classification_logits' in class_info:
-            cat_labels = torch.cat(label_inputs, axis=1)
-            classification_loss = F.binary_cross_entropy_with_logits(class_info['classification_logits'], cat_labels, reduction='none')
+        if 'classification_logits' in class_info and label_inputs is not None and categorical_labels:
+            assert len(label_inputs) == len(categorical_labels)
+            logits = class_info['classification_logits']
+            classification_losses = []
+            for i in range(len(categorical_labels)):
+                labels = categorical_labels[i]
+                source_logits = logits[:,self.offsets[i]:self.offsets[i + 1]]
+                if labels.ndim == 1:
+                    ent = F.cross_entropy(logits, labels, reduction='none')
+                    ent = torch.broadcast_to(ent.unsqueeze(-1), source_logits.shape)
+                    # print("ent shape", ent.shape, file=sys.stderr)
+                else:
+                    assert labels.max() <= 1. and labels.min() >= 0., "Labels should be softmaxed before computing classification loss."
+                    ent = F.binary_cross_entropy(torch.nn.functional.softmax(logits, -1), labels, reduction='none')
+                    print("ent shape after softmax", ent.shape, file=sys.stderr)
+                # print(ent, "loss", ent.shape)
+                classification_losses.append(ent)
+            #print([x.shape for x in classification_losses], "loss shapes")
+            #print("class sizes: ", self.categorical_class_sizes)
+            #print("cat labels: ", categorical_labels)
+            # print("losses:", classification_losses)
+            classification_loss = torch.cat(classification_losses, axis=-1)
         else:
             classification_loss = None
         kl_loss, recon_loss = losses[:2]
@@ -302,7 +324,7 @@ class NBVAE(nn.Module):
         packed_inputs += [data.mu, data.theta, data.scale]
         if self.zero_inflate:
             packed_inputs.append(data.zi_logits)
-        assert all(len(x.shape) == 2 for x in packed_inputs)
+        assert all(len(x.shape) == 2 for x in packed_inputs), f"{[x.shape for x in packed_inputs]}"
         packed_result = torch.cat(packed_inputs, -1)
         # print(f"packed_result: {packed_result}", file=sys.stderr)
         return packed_result

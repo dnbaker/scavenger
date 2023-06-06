@@ -150,8 +150,8 @@ for epoch_id in range(args.epochs):
         label_arg = []
         if settings.class_loss_ratio > 0.:
             sublabels = labels[idxtouse]
-            sublabels = torch.nn.functional.one_hot(sublabels, num_classes=num_labels).to(submatrix.dtype)
             label_arg = [sublabels]
+            # print("label arg: ", label_arg, file=sys.stdout)
         res = model(submatrix, label_arg)
         unpacked_out = model.unpack(res)
         latent, losses, zinb, class_info = unpacked_out
@@ -200,7 +200,8 @@ for epoch_id in range(args.epochs):
         end = start + args.batch_size
         idxtouse = randperm[test_vals]
         submatrix = torch.from_numpy(mat[idxtouse, :].todense().astype(np.float32))
-        latent, losses, zinb, class_info = model.unpack(model(submatrix))
+        label_arg = [labels[idxtouse]]
+        latent, losses, zinb, class_info = model.unpack(model(submatrix, label_arg))
         latent_repr, sampled_repr, nb_model, logvar, full_cov = latent
         outfile[idxtouse,:] = latent_repr.detach()
         if class_info is not None:
