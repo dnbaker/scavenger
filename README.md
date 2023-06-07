@@ -8,6 +8,7 @@ Contents:
   2. Allowance of softmax/uncertain classification allows semi-supervised learning.
   3. Optional classifier loss helps the model distinguish as well, giving us two locations for batch correction in the model.
 3. Use of equivariant GNN for spatially-resolved patches. The aim is to use VAE-based embeddings in the spatial model.
+  1. Code in `scavenger/experimental/equiformer.py`.
 
 
 
