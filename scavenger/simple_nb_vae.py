@@ -260,30 +260,31 @@ class NBVAE(nn.Module):
             full_cov = full_cov.reshape(full_cov.shape[0], -1)
         return latent_outputs, losses, decoded, full_cov, class_info
 
-    def forward(self, x, categorical_labels=None):
+    def forward(self, x, categorical_labels=None, temp=10.):
         ## Preprocess cats
         assert categorical_labels is None or len(categorical_labels) == len(self.categorical_class_sizes)
         num_cats = sum(self.categorical_class_sizes)
-        def process_label_set(ls, num_labels):
+        def process_label_set(ls, num_labels, temp):
+            # Handles logits (directly)
+            # and converts tokens to one_hot.
+            # temp defaults to  10., which means true labels are 20,000 more likely than the false ones.
             if isinstance(ls, np.ndarray):
                 ls = torch.from_numpy(ls)
             if ls.dtype is torch.long:
-                ls = torch.nn.functional.one_hot(ls, num_labels)
+                ls = torch.nn.functional.one_hot(ls, num_labels) * temp
             ls = ls.to(x.dtype)
             return ls
         if categorical_labels is not None:
             label_inputs = [process_label_set(labels, num_labels) for labels, num_labels in zip(categorical_labels, self.categorical_class_sizes)]
             # print("shape before cat labels: ", [x.shape for x in label_inputs])
         elif num_cats > 0:
-            # If categorical labels are not present, just leave as 0
+            # If categorical labels are not present, just leave as 0.
             label_inputs = [torch.zeros((x.shape[0], num_cats), dtype=x.dtype)]
-            # print("shape before zeroed labels: ", [x.shape for x in label_inputs])
         else:
             label_inputs = None
+        # After processing, we've concatenated the logits-encoded labels
         if label_inputs is not None:
-            #print("x shape before labels: ", x.shape)
             x = torch.cat([x] + label_inputs, axis=1)
-            #print("x shape after labels: ", x.shape)
 
         ## Run network
         latent, losses, data, full_cov, class_info = self.run(x)
@@ -302,12 +303,7 @@ class NBVAE(nn.Module):
                     assert labels.max() <= 1. and labels.min() >= 0., "Labels should be softmaxed before computing classification loss."
                     ent = F.binary_cross_entropy(torch.nn.functional.softmax(logits, -1), labels, reduction='none')
                     print("ent shape after softmax", ent.shape, file=sys.stderr)
-                # print(ent, "loss", ent.shape)
                 classification_losses.append(ent)
-            #print([x.shape for x in classification_losses], "loss shapes")
-            #print("class sizes: ", self.categorical_class_sizes)
-            #print("cat labels: ", categorical_labels)
-            # print("losses:", classification_losses)
             classification_loss = torch.cat(classification_losses, axis=-1)
         else:
             classification_loss = None
@@ -326,12 +322,11 @@ class NBVAE(nn.Module):
             packed_inputs.append(data.zi_logits)
         assert all(len(x.shape) == 2 for x in packed_inputs), f"{[x.shape for x in packed_inputs]}"
         packed_result = torch.cat(packed_inputs, -1)
-        # print(f"packed_result: {packed_result}", file=sys.stderr)
         return packed_result
 
+    # Takes packed output for self.forward and makes a (latent_space, losses, model, classification_info) output tuple.
     def unpack(self, packed_result):
         total = packed_result.shape[1]
-        # print("total:", packed_result.shape)
         end_of_latent_without_cov = self.latent_dim * 5
         end_of_latent = end_of_latent_without_cov + \
             (self.latent_dim ** 2 if self.full_cov else 0)
@@ -362,6 +357,8 @@ class NBVAE(nn.Module):
             losses = losses + (class_loss,)
         return ((latent, gen, mu, logvar, full_cov), losses, ZINB(scale=scale, mu=mu, theta=theta, zi_logits=zi_logits), (class_logits, class_loss) if class_logits is not None else None)
 
+    # Takes packed output for self.forward and makes a (latent_space, losses, model, classification_info) output dictionary.
+    # Same as unpack, but more human-readable.
     def labeled_unpack(self, unpacked_result):
         if not isinstance(unpacked_result, tuple):
             unpacked_result = self.unpack(unpacked_result)
@@ -407,5 +404,3 @@ class UNetDiscriminator(nn.Module):
     @staticmethod
     def loss(data, labels, reduction=None, weights=None):
         return F.binary_cross_entropy(data, target, weight=weights, reduction=reduction)
-
-
