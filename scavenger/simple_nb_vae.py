@@ -366,7 +366,7 @@ class NBVAE(nn.Module):
         ret = {"latent": {"centroid": latent[0], "sampled": latent[1], "mu": latent[2], "logvar": latent[3]}, "loss": {"kl": losses[0], "recon": losses[1]}, "dist": dist, "class": class_info}
         if len(losses) > 2:
             ret['loss']['class'] = losses[2]
-        if len(latent > 4):
+        if len(latent) > 4:
             ret["latent"]["full_cov"] = latent[4]
         return ret
 

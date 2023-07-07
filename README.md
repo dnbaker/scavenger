@@ -17,7 +17,7 @@ For count-based data, see `train.py` for an example.
 
 `scavenger.NBVAE` is the class you'll want to work with. Use `full_cov={True, False}` to choose between the isotropic variance and full covariance matrix options.
 
-The isotropic case (diagonal covariance) is simpler in latent space and may pull our more independent information. But the full diagonal model has higher capacity.
+The diagonal covariance is simpler in latent space and may pull our more independent information. But the full diagonal model has higher capacity and yields a much higher likelihood on real data.
 
 ```
 from scavenger import NBVAE
@@ -58,7 +58,12 @@ model_loss, reconstruction_loss = losses[:2]
 
 
 ### Batch correction/integration
-For batch correction, use `categorical_class_sizes=` when constructed NBVAE.
+For batch correction, use `categorical_class_sizes=[num_batches]` when constructed NBVAE, and add a one-hot encoded label.
+If you have additional categorical labels (spatial data, atac-seq, microarray/short/long read, library prep), add them to the list, too.
+
+For instance `categorical_class_sizes=[num_batches, num_experiment_types, num_library_preps]`.
+
+Then, when calling forward on the model,
 
 For example:
 
@@ -76,36 +81,35 @@ shapes = [x.shape[0] for x in (dataset1, dataset2)]
 
 merged_dataset = torch.vstack([dataset1, dataset2])
 
-merged_labels = torch.vstack([torch.zeros(x, dtype=torch.float32).reshape(-1, 1) + xi for xi, x in enumerate(shapes)]).to(merged_dataset.dtype)
-
-labeled_dataset = torch.hstack([merged_dataset, merged_labels])
+merged_labels = torch.vstack([torch.zeros(x, dtype=torch.long).reshape(-1, 1) + xi for xi, x in enumerate(shapes)]).to(merged_dataset.dtype)
 
 # Now you can train:
-packed_output = model(data)
-labels = label_logits
-latent, losses, zinb, class_info = model(data, labels=label_logits)
-# labels can be one-hot or logits
+# Get batches of data + labels
 
+idx = sampled_set()
+data = merged_data[idx]
+labels = merged_labels[idx]
+
+# labels can be one-hot or logits
+# One-hot items (which are torch.long dtype) are treated as logits * 20, so 20,000 more likely to be the provided class.
+# You can raise or lower this ratio with `temp=` for the forward call.
+# Logits are used directly otherwise.
+packed_output = model(data, labels)
+
+labels = label_logits
+# Get a tuple out
+latent, losses, zinb, class_info = packed_output
+# Or a dictionary, which is easier to reason with.
+labeled_output = model.labeled_unpack(packed_output)
 latent_repr, sampled_repr, nb_model, logvar, full_cov = latent
 model_loss, reconstruction_loss = losses[:2]
 class_logits, class_loss = class_info
-class_loss.sum(axis=1).backward()
+total_loss = model_loss.sum() + reconstruction_loss.sum() + class_loss.sum()
+total_loss.backward()
 ```
 
 By having the model learn the classes, it can try to distinguish batches/effect types.
 
-I aim to test this using rnaseq expression atlases for normal background.
+If you don't provide the class labels, the model will still generate logits for categorical labels, but it will only use count data to estimate. This gives it a light semi-supervised approach.
 
-### Ideas to try
-
-Other ideas to try
-
-0. Diffusion model for genetic pretraining + spatial joint modeling (like destvi)
-
-1. Scaling loss by variance of genes (or a variation of it)
-
-2. Pretrain individually, then fine-tune using local data pooled with graph nn
-
-3. Predict what it should look like to match data across types.
-
-
+I aim to test this using rnaseq expression atlases for normal background (e.g., GTEx) for bulk data but leveraged for single-cell analysis.
