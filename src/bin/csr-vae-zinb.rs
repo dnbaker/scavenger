@@ -1,6 +1,6 @@
 use clap::Parser;
-use rust_scvi::iter::{CSRMatrix, IterCSR};
-use rust_scvi::nnutil::{self, *};
+use scavenger::iter::{CSRMatrix, IterCSR};
+use scavenger::nnutil::{self, *};
 use std::collections::{BTreeSet, HashMap};
 use tch::{self, nn, nn::ModuleT, nn::OptimizerConfig, Kind, Tensor};
 

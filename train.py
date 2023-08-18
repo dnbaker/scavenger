@@ -28,7 +28,9 @@ ap.add_argument("--compile", action='store_true')
 ap.add_argument("--gradientfreq", '-G', type=int, help="Number of batches between calling backward.", default=1)
 ap.add_argument("--class-loss-ratio", type=float, default=0.)
 ap.add_argument("--save-epoch-models", action='store_true')
+ap.add_argument("--scale-recon-by-variance", action='store_true')
 ap.add_argument("--outdir")
+ap.add_argument("--compute-class-loss-always", "-C", action='store_true')
 
 args = ap.parse_args()
 args.full_cov = not args.no_full_cov
@@ -92,29 +94,62 @@ hidden_dims = hidden
 
 os.makedirs(args.outdir, exist_ok=True)
 
+num_genes = mat.shape[1]
+
 
 outfile = np.memmap(args.outdir + f"/latent.npy.f32", dtype=np.float32, shape=(mat.shape[0], latent_dim), mode='w+')
 
+compute_class_loss = args.class_loss_ratio > 0. or args.compute_class_loss_always
+
 model = simple_nb_vae.NBVAE(data_dim=mat.shape[1], latent_dim=latent_dim,
                             hidden_dim=hidden_dims, full_cov=args.full_cov, zero_inflate=args.zero_inflate,
-                            categorical_class_sizes=[num_labels] if args.class_loss_ratio > 0. else [])
-print(model)
+                            categorical_class_sizes=[num_labels] if compute_class_loss else [])
+
+recon_loss_weights = None
+
+if args.scale_recon_by_variance:
+    print("mat.shape", mat.shape)
+    feature_means = np.asarray(mat.mean(axis=0)).reshape(-1)
+    varsum = None
+    for row in mat:
+        row = np.asarray(row.todense()).reshape(-1)
+        tmp = row - feature_means
+        tmp *= tmp
+        if varsum is not None:
+            varsum += tmp
+        else:
+            varsum = tmp
+    feature_variances = varsum / mat.shape[0]
+    '''
+    for idx, var in enumerate(feature_variances):
+        if var > 0.:
+            print(f"feature {idx} had variance {var}", file=sys.stderr)
+    '''
+    scaled_variances = (feature_variances / (feature_means + 1e-4))
+    if recon_loss_weights is None:
+        recon_loss_weights = scaled_variances
+    else:
+        recon_loss_weights *= scaled_variances
+    recon_loss_weights = torch.from_numpy(recon_loss_weights)
+
 f16 = None
 if args.compile:
     f16 = torch.from_numpy(mat[:37, :].todense().astype(np.float32))
-    label16 = torch.nn.functional.one_hot(labels[:37], num_classes=num_labels)
-    f16 = torch.cat([f16, label16], axis=1)
+    if compute_class_loss:
+        label16 = torch.nn.functional.one_hot(labels[:37], num_classes=num_labels)
+        f16 = torch.cat([f16, label16], axis=1)
     module = torch.jit.trace(model, f16, check_trace=False)
     traced_module = module
     import datetime
     s = str(datetime.datetime.now()).replace(" ", "_")
     traced_module.save(f"__tracedmodule.{s}.pytorch_jit.pt")
 
-    module = torch.compile(model)
-    torch.save(module, f"__tracedmodule.{s}.pytorch_opt.pt")
-    torch.manual_seed(0)
-    out_compile = module(f16)
-    assert torch.allclose(out_orig, out_compile)
+    module = torch.compile(model, fullgraph=True)
+    #module.save(f"__tracedmodule.{s}.pytorch_opt.pt")
+    # torch.save(module, f"__tracedmodule.{s}.pytorch_opt.pt"
+    #torch.manual_seed(0)
+    #out_compile = module(f16)
+    #assert torch.allclose(out_orig, out_compile)
 '''
 out = model(f16)
 # print("out:", out.shape)
@@ -148,7 +183,7 @@ for epoch_id in range(args.epochs):
         idxtouse = train_vals[idxtouse]
         submatrix = torch.from_numpy(mat[idxtouse].todense().astype(np.float32))
         label_arg = []
-        if settings.class_loss_ratio > 0.:
+        if compute_class_loss:
             sublabels = labels[idxtouse]
             label_arg = [sublabels]
             # print("label arg: ", label_arg, file=sys.stdout)
@@ -164,8 +199,13 @@ for epoch_id in range(args.epochs):
             class_loss = class_logits = None
         model_loss, recon_loss = losses[:2]
 
+        print(recon_loss.shape, recon_loss_weights.shape, "are the loss, weight shapes")
+        if recon_loss_weights is not None:
+            recon_loss = recon_loss[...,:num_genes] * recon_loss_weights
+
         assert class_loss is None or (len(losses) > 2 and losses[2] is not None)
 
+        print(f"loss sizes: elbo {model_loss.size()}, recon {recon_loss.size()}", file=sys.stderr)
         loss = model_loss.sum(axis=1) + recon_loss.sum(axis=1)
         if class_loss is not None and args.class_loss_ratio > 0.:
             loss += class_loss.sum(axis=1) * args.class_loss_ratio
@@ -198,7 +238,7 @@ for epoch_id in range(args.epochs):
         randperm = torch.randperm(num_test)
         start = batch_id * args.batch_size
         end = start + args.batch_size
-        idxtouse = randperm[test_vals]
+        idxtouse = randperm[start:end]
         submatrix = torch.from_numpy(mat[idxtouse, :].todense().astype(np.float32))
         label_arg = [labels[idxtouse]]
         latent, losses, zinb, class_info = model.unpack(model(submatrix, label_arg))

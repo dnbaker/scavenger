@@ -1,6 +1,6 @@
 use clap::Parser;
-use rust_scvi::iter::Iter;
-use rust_scvi::nnutil::*;
+use scavenger::iter::Iter;
+use scavenger::nnutil::*;
 use std::collections::HashMap;
 use tch::{self, nn, nn::ModuleT, nn::OptimizerConfig, Kind, Tensor};
 

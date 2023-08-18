@@ -19,7 +19,7 @@ def log_likelihood_nb(x, mu, theta, scale):
     + x * (log_mu_eps - log_theta_mu_eps)
     + (x + theta).lgamma()
     - theta.lgamma()
-    - (x + 1).lgamma()
+    - (x + 1.).lgamma()
     return ret
 
 
@@ -43,7 +43,7 @@ def log_likelihood_zinb(x, mu, theta, scale, zi_logits):
                      + x * (log_mu_eps - log_theta_mu_eps)
                      + (x + theta).lgamma()
                      - theta.lgamma()
-                     - (x + 1).lgamma())
+                     - (x + 1.).lgamma())
 
     xlt_eps = x < VAR_EPS
     xge_eps = xlt_eps.logical_not()
@@ -264,7 +264,7 @@ class NBVAE(nn.Module):
         ## Preprocess cats
         assert categorical_labels is None or len(categorical_labels) == len(self.categorical_class_sizes)
         num_cats = sum(self.categorical_class_sizes)
-        def process_label_set(ls, num_labels, temp):
+        def process_label_set(ls, num_labels):
             # Handles logits (directly)
             # and converts tokens to one_hot.
             # temp defaults to  10., which means true labels are 20,000 more likely than the false ones.
@@ -302,7 +302,7 @@ class NBVAE(nn.Module):
                 else:
                     assert labels.max() <= 1. and labels.min() >= 0., "Labels should be softmaxed before computing classification loss."
                     ent = F.binary_cross_entropy(torch.nn.functional.softmax(logits, -1), labels, reduction='none')
-                    print("ent shape after softmax", ent.shape, file=sys.stderr)
+                    # print("ent shape after softmax", ent.shape, file=sys.stderr)
                 classification_losses.append(ent)
             classification_loss = torch.cat(classification_losses, axis=-1)
         else:
