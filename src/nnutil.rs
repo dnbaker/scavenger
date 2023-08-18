@@ -677,15 +677,13 @@ impl ZINB {
     pub fn log_likelihood_nb(&self, x: &Tensor) -> Tensor {
         let log_theta_mu_eps = (&self.theta + &self.mu + VAR_EPS).log();
         let log_mu_eps = (&self.mu + VAR_EPS).log();
-        let ret = &self.theta * ((&self.theta + VAR_EPS).log() - &log_theta_mu_eps)
+        &self.theta * ((&self.theta + VAR_EPS).log() - &log_theta_mu_eps)
             + x * (log_mu_eps - log_theta_mu_eps)
             + (x + &self.theta).lgamma()
             - &self.theta.lgamma()
-            - (x + 1).lgamma();
-        ret
+            - (x + 1.).lgamma();
     }
     pub fn log_likelihood(&self, x: &Tensor) -> tch::Tensor {
-        // eprintln!("Started");
         let softplus_pi = (-self.pi()).softplus();
 
         let theta_eps = &self.theta + VAR_EPS;
@@ -696,7 +694,6 @@ impl ZINB {
 
         let pi_theta_log = -self.pi() + &self.theta * (&log_theta_eps - &log_theta_mu_eps);
         let log_mu_eps = (&self.mu + VAR_EPS).log();
-        //eprintln!("Made pi theta and log mu");
 
         let case_zero = (pi_theta_log).softplus() - &softplus_pi;
         let case_non_zero = -softplus_pi
@@ -704,16 +701,13 @@ impl ZINB {
             + x * (log_mu_eps - log_theta_mu_eps)
             + (x + &self.theta).lgamma()
             - &self.theta.lgamma()
-            - (x + 1).lgamma();
-        //eprintln!("made case_non_zero. Shape: {:?}", case_non_zero.size2());
+            - (x + 1.).lgamma();
 
         let xlt_eps = x.less(tch::Scalar::from(VAR_EPS));
         let xge_eps = xlt_eps.logical_not();
 
-        //eprintln!("Made cases");
         let mul_case_zero = case_zero * xlt_eps.internal_cast_float(/*non_blocking=*/ false);
         let mul_case_nonzero = case_non_zero * xge_eps.internal_cast_float(false);
-        //eprintln!("Made mulcases");
         mul_case_zero + mul_case_nonzero
     }
 }

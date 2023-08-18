@@ -85,16 +85,13 @@ fn main() -> Result<(), tch::TchError> {
         .unwrap_or(0i64);
     let device = nnutil::best_device_available();
     let mut vs = nn::VarStore::new(device);
-    let csr_data: Option<CSRMatrix> = match data.get("indptr") {
-        Some(indptr) => Some(CSRMatrix {
-            data: data["data"].shallow_clone().to_kind(Kind::Float),
-            indptr: indptr.shallow_clone(),
-            indices: data["indices"].shallow_clone(),
-            shape: Vec::<i64>::try_from(&data["shape"]).unwrap(),
-            kind: Kind::Float,
-        }),
-        None => None,
-    };
+    let csr_data = data.get("indptr").map(|indptr| CSRMatrix {
+        data: data["data"].shallow_clone().to_kind(Kind::Float),
+        indptr: indptr.shallow_clone(),
+        indices: data["indices"].shallow_clone(),
+        shape: Vec::<i64>::try_from(&data["shape"]).unwrap(),
+        kind: Kind::Float,
+    });
     if csr_data.is_none() {
         panic!("Testing csr format");
     }
@@ -157,19 +154,23 @@ fn main() -> Result<(), tch::TchError> {
             rloss_sum += current_recon_loss;
             klloss_sum += current_kl_loss;
             let mut loss = recon_loss + kl_loss * settings.kl_scale;
-            let current_class_loss = if settings.add_classifier_loss && blabels.is_some() {
-                let classifier_loss = classifier_layer
-                    .forward_t(&latent_data.0, true)
-                    .cross_entropy_for_logits(&blabels.unwrap())
-                    .sum(tch::Kind::Float);
-                let classifier_double = classifier_loss.double_value(&[]);
-                class_loss_sum += classifier_double;
-                log::debug!(
-                    "Classifier loss at {epoch}:{batch_index}: {}",
-                    classifier_double
-                );
-                loss = loss + classifier_loss;
-                classifier_double
+            let current_class_loss = if settings.add_classifier_loss {
+                blabels
+                    .map(|blabels| {
+                        let classifier_loss = classifier_layer
+                            .forward_t(&latent_data.0, true)
+                            .cross_entropy_for_logits(&blabels)
+                            .sum(tch::Kind::Float);
+                        let classifier_double = classifier_loss.double_value(&[]);
+                        class_loss_sum += classifier_double;
+                        log::debug!(
+                            "Classifier loss at {epoch}:{batch_index}: {}",
+                            classifier_double
+                        );
+                        loss += classifier_loss;
+                        classifier_double
+                    })
+                    .unwrap_or(0.)
             } else {
                 0.
             };
@@ -214,7 +215,7 @@ fn main() -> Result<(), tch::TchError> {
     let model = tch::CModule::create_by_tracing(
         &format!("{}NBVAE", if settings.zero_inflate { "ZI" } else { "" })[..],
         "forward",
-        &[Tensor::randn(&[16, data_dim], (Kind::Float, device))],
+        &[Tensor::randn([16, data_dim], (Kind::Float, device))],
         &mut closure,
     )?;
     model.save(format!(

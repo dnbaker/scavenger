@@ -152,7 +152,7 @@ fn main() -> Result<(), TchError> {
                     "Classifier loss at {epoch}:{batch_index}: {}",
                     classifier_double
                 );
-                loss = loss + classifier_loss;
+                loss += classifier_loss;
                 classifier_double
             } else {
                 0.
@@ -194,7 +194,7 @@ fn main() -> Result<(), TchError> {
     let model = tch::CModule::create_by_tracing(
         "NBVAE",
         "forward",
-        &[Tensor::zeros(&[data_dim], (Kind::Float, device))],
+        &[Tensor::zeros([data_dim], (Kind::Float, device))],
         &mut closure,
     )?;
     model.save(format!(
