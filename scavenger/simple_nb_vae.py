@@ -130,10 +130,9 @@ def process_label_set(ls, num_labels, temp=10., dtype=None):
 
 
 def encoded_labels(categorical_labels, *, temp, class_sizes, dtype):
-    # label_inputs = encoded_labels(labels, num_labels=num_labels, temp=temp, num_cats=num_cats)
     num_cats = sum(class_sizes)
     if categorical_labels is not None:
-        label_inputs = [process_label_set(categorical_labels, num_labels, temp=temp, dtype=dtype) for labels, num_labels in zip(categorical_labels, class_sizes)]
+        label_inputs = [process_label_set(labels, num_labels, temp=temp, dtype=dtype) for labels, num_labels in zip(categorical_labels, class_sizes)]
         # print("shape before cat labels: ", [x.shape for x in label_inputs])
     elif num_cats > 0:
         # If categorical labels are not present, just leave as 0.
@@ -297,15 +296,7 @@ class NBVAE(nn.Module):
         ## Preprocess cats
         assert categorical_labels is None or len(categorical_labels) == len(self.categorical_class_sizes), f"{categorical_labels} and sizes {self.categorical_class_sizes}"
         num_cats = sum(self.categorical_class_sizes)
-        if categorical_labels is not None:
-            label_inputs = [process_label_set(labels, num_labels, temp=temp, dtype=x.dtype) for labels, num_labels in zip(categorical_labels, self.categorical_class_sizes)]
-            # print("shape before cat labels: ", [x.shape for x in label_inputs])
-        elif num_cats > 0:
-            # If categorical labels are not present, just leave as 0.
-            label_inputs = [torch.zeros((x.shape[0], num_cats), dtype=x.dtype)]
-        else:
-            label_inputs = None
-        # label_inputs = encoded_labels(categorical_labels, class_sizes=self.categorical_class_sizes, temp=temp)
+        label_inputs = encoded_labels(categorical_labels, class_sizes=self.categorical_class_sizes, temp=temp, dtype=x.dtype)
         # After processing, we've concatenated the logits-encoded labels
         if label_inputs is not None:
             x = torch.cat([x] + label_inputs, axis=1)

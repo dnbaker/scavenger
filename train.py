@@ -117,11 +117,10 @@ if args.scale_recon_by_variance:
     for row in mat[1:]:
         varsum += row_to_var(row)
     feature_variances = varsum / mat.shape[0]
-    scaled_variances = (feature_variances / (feature_means + 1e-4))
+    scaled_variances = torch.from_numpy(feature_variances / (feature_means + 1e-4))
     if recon_loss_weights is None:
         recon_loss_weights = recon_loss_weights = torch.ones_like(scaled_variances)
     recon_loss_weights *= scaled_variances
-    recon_loss_weights = torch.from_numpy(recon_loss_weights)
 
 f16 = None
 if args.compile:
