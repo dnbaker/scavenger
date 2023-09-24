@@ -681,7 +681,7 @@ impl ZINB {
             + x * (log_mu_eps - log_theta_mu_eps)
             + (x + &self.theta).lgamma()
             - &self.theta.lgamma()
-            - (x + 1.).lgamma();
+            - (x + 1.).lgamma()
     }
     pub fn log_likelihood(&self, x: &Tensor) -> tch::Tensor {
         let softplus_pi = (-self.pi()).softplus();
@@ -724,7 +724,7 @@ impl ZINBDecoder {
         }
     }
     pub fn decode(&self, input: &tch::Tensor, library_size: &tch::Tensor, train: bool) -> ZINB {
-        let px = self.fclayers.layers.forward_t(&input, train);
+        let px = self.fclayers.layers.forward_t(input, train);
         log::debug!("px generated. px shape: {:?}", px.size());
         log::debug!("input shape: {:?}", input.size());
         log::debug!(

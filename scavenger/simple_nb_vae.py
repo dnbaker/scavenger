@@ -115,6 +115,34 @@ def tril2full_and_nonneg(tril, dim, nonneg_function=F.softplus):
     return unpacked
 
 
+
+def process_label_set(ls, num_labels, temp=10., dtype=None):
+    # Handles logits (directly)
+    # and converts tokens to one_hot.
+    # temp defaults to  10., which means true labels are 20,000 more likely than the false ones.
+    if isinstance(ls, np.ndarray):
+        ls = torch.from_numpy(ls)
+    if ls.dtype is torch.long:
+        ls = torch.nn.functional.one_hot(ls, num_labels) * temp
+    ls = ls.to(dtype)
+    return ls
+
+
+
+def encoded_labels(categorical_labels, *, temp, class_sizes, dtype):
+    # label_inputs = encoded_labels(labels, num_labels=num_labels, temp=temp, num_cats=num_cats)
+    num_cats = sum(class_sizes)
+    if categorical_labels is not None:
+        label_inputs = [process_label_set(categorical_labels, num_labels, temp=temp, dtype=dtype) for labels, num_labels in zip(categorical_labels, class_sizes)]
+        # print("shape before cat labels: ", [x.shape for x in label_inputs])
+    elif num_cats > 0:
+        # If categorical labels are not present, just leave as 0.
+        label_inputs = [torch.zeros((x.shape[0], num_cats), dtype=x.dtype)]
+    else:
+        label_inputs = None
+    return label_inputs
+
+
 def indptr_labels(labels):
     return torch.cat((torch.zeros(1, dtype=torch.long), torch.cumsum(torch.from_numpy(np.array(labels, dtype=np.int64)), 0)))
 
@@ -230,17 +258,22 @@ class NBVAE(nn.Module):
             latent_range = torch.arange(self.latent_dim)
             var = full_cov[:, latent_range, latent_range]
             logvar = var.log()
-            # log_q_z = -.5*(noise.square() + logvar + log2pi)
-            # log_p_z = -.5*(z**2 + log2pi)
-            # the log2pi cancels out
-            # log_q_z = -.5*(noise.square() + logvar)
-            # log_p_z = -.5*(z**2)
-            # kl_loss = -log_p_z + log_q_z
-            # log_q_z = -.5*(noise.square() + logvar)
-            # log_p_z = -.5*(z**2)
             kl_loss = .5 * (gen.square() - (noise.square() + logvar))
+            '''
+            check_math = 1
+            if check_math:
+                log_q_z = -.5*(noise.square() + logvar + log2pi)
+                log_p_z = -.5*(z**2 + log2pi)
+                # the log2pi cancels out
+                log_q_z = -.5*(noise.square() + logvar)
+                log_p_z = -.5*(z**2)
+                kl_loss_manual = -log_p_z + log_q_z
+                assert torch.allclose(kl_loss_manual, kl_loss)
+            # log_q_z = -.5*(noise.square() + logvar)
+            # log_p_z = -.5*(z**2)
             # kl_loss = -log_p_z + log_q_z
             # https://arxiv.org/pdf/1906.02691.pdf, page 29
+            '''
         else:
             full_cov = None
             var = self.nonneg_function(meanvar[:, self.latent_dim:])
@@ -248,7 +281,7 @@ class NBVAE(nn.Module):
             std = (logvar * 0.5).exp() + VAR_EPS
             eps = torch.randn_like(std)
             gen = mu + eps * std
-            kl_loss = -0.5 * (1 + logvar - torch.pow(mu, 2) - logvar.exp())
+            kl_loss = -0.5 * (1. + logvar - mu.square() - var)
         latent_outputs = (gen, mu, logvar)
         library_size = x.sum(dim=[1]).unsqueeze(1)
         decoded = self.decode(gen, library_size)
@@ -262,32 +295,24 @@ class NBVAE(nn.Module):
 
     def forward(self, x, categorical_labels=None, temp=10.):
         ## Preprocess cats
-        assert categorical_labels is None or len(categorical_labels) == len(self.categorical_class_sizes)
+        assert categorical_labels is None or len(categorical_labels) == len(self.categorical_class_sizes), f"{categorical_labels} and sizes {self.categorical_class_sizes}"
         num_cats = sum(self.categorical_class_sizes)
-        def process_label_set(ls, num_labels):
-            # Handles logits (directly)
-            # and converts tokens to one_hot.
-            # temp defaults to  10., which means true labels are 20,000 more likely than the false ones.
-            if isinstance(ls, np.ndarray):
-                ls = torch.from_numpy(ls)
-            if ls.dtype is torch.long:
-                ls = torch.nn.functional.one_hot(ls, num_labels) * temp
-            ls = ls.to(x.dtype)
-            return ls
         if categorical_labels is not None:
-            label_inputs = [process_label_set(labels, num_labels) for labels, num_labels in zip(categorical_labels, self.categorical_class_sizes)]
+            label_inputs = [process_label_set(labels, num_labels, temp=temp, dtype=x.dtype) for labels, num_labels in zip(categorical_labels, self.categorical_class_sizes)]
             # print("shape before cat labels: ", [x.shape for x in label_inputs])
         elif num_cats > 0:
             # If categorical labels are not present, just leave as 0.
             label_inputs = [torch.zeros((x.shape[0], num_cats), dtype=x.dtype)]
         else:
             label_inputs = None
+        # label_inputs = encoded_labels(categorical_labels, class_sizes=self.categorical_class_sizes, temp=temp)
         # After processing, we've concatenated the logits-encoded labels
         if label_inputs is not None:
             x = torch.cat([x] + label_inputs, axis=1)
 
         ## Run network
         latent, losses, data, full_cov, class_info = self.run(x)
+        classification_loss = None
         if 'classification_logits' in class_info and label_inputs is not None and categorical_labels:
             assert len(label_inputs) == len(categorical_labels)
             logits = class_info['classification_logits']
@@ -296,17 +321,18 @@ class NBVAE(nn.Module):
                 labels = categorical_labels[i]
                 source_logits = logits[:,self.offsets[i]:self.offsets[i + 1]]
                 if labels.ndim == 1:
+                    # Tokens: use cross entropy
                     ent = F.cross_entropy(logits, labels, reduction='none')
                     ent = torch.broadcast_to(ent.unsqueeze(-1), source_logits.shape)
                     # print("ent shape", ent.shape, file=sys.stderr)
                 else:
+                    # vector of weights: use binary cross entropy
                     assert labels.max() <= 1. and labels.min() >= 0., "Labels should be softmaxed before computing classification loss."
-                    ent = F.binary_cross_entropy(torch.nn.functional.softmax(logits, -1), labels, reduction='none')
+                    ent = F.binary_cross_entropy_with_logits(logits, labels, reduction='none')
+                    # ent = F.binary_cross_entropy(torch.nn.functional.softmax(logits, -1), labels, reduction='none')
                     # print("ent shape after softmax", ent.shape, file=sys.stderr)
                 classification_losses.append(ent)
             classification_loss = torch.cat(classification_losses, axis=-1)
-        else:
-            classification_loss = None
         kl_loss, recon_loss = losses[:2]
         packed_inputs = list(latent) + [kl_loss]
         if full_cov is not None:

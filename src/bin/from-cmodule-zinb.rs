@@ -86,16 +86,13 @@ fn main() -> Result<(), tch::TchError> {
         .unwrap_or(0i64);
     let device = nnutil::best_device_available();
     let mut vs = nn::VarStore::new(device);
-    let csr_data: Option<CSRMatrix> = match data.get("indptr") {
-        Some(indptr) => Some(CSRMatrix {
-            data: data["data"].shallow_clone().to_kind(Kind::Float),
-            indptr: indptr.shallow_clone(),
-            indices: data["indices"].shallow_clone(),
-            shape: Vec::<i64>::try_from(&data["shape"]).unwrap(),
-            kind: Kind::Float,
-        }),
-        None => None,
-    };
+    let csr_data: Option<CSRMatrix> = data.get("indptr").map(|indptr| CSRMatrix {
+        data: data["data"].shallow_clone().to_kind(Kind::Float),
+        indptr: indptr.shallow_clone(),
+        indices: data["indices"].shallow_clone(),
+        shape: Vec::<i64>::try_from(&data["shape"]).unwrap(),
+        kind: Kind::Float,
+    });
     if csr_data.is_none() {
         panic!("Testing csr format");
     }
@@ -199,7 +196,7 @@ fn main() -> Result<(), tch::TchError> {
     let model = tch::CModule::create_by_tracing(
         &format!("{}NBVAE", if settings.zero_inflate { "ZI" } else { "" })[..],
         "forward",
-        &[Tensor::randn(&[16, data_dim], (Kind::Float, device))],
+        &[Tensor::randn([16, data_dim], (Kind::Float, device))],
         &mut closure,
     )?;
     model.save(format!(

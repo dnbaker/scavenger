@@ -124,7 +124,7 @@ impl LatentGM {
 }
 
 mod tests {
-    use crate::gaussian_mixture::*;
+    use crate::gaussian::*;
     #[test]
     fn test_stuff() {
         /*

@@ -1,3 +1,3 @@
-pub mod gaussian_mixture;
+pub mod gaussian;
 pub mod iter;
 pub mod nnutil;

@@ -37,7 +37,7 @@ args.full_cov = not args.no_full_cov
 if not args.outdir:
     import string
     args.outdir = "".join(np.random.choice(list(string.ascii_lowercase), size=(10,)))
-    print(args.outdir,  "is out dir")
+    print(args.outdir,  "is out dir", file=sys.stderr)
 
 args.outdir = args.outdir + "/"
 
@@ -63,7 +63,6 @@ hidden = list(map(int, args.hidden.split(',')))
 
 start_time = time.time()
 print(f"Starting with args {args} at time {start_time}", file=sys.stderr)
-# print(hidden)
 
 torch.manual_seed(args.seed)
 base = "/Users/dnb13/Desktop/code/compressed_bundle/PBMC"
@@ -108,37 +107,31 @@ model = simple_nb_vae.NBVAE(data_dim=mat.shape[1], latent_dim=latent_dim,
 recon_loss_weights = None
 
 if args.scale_recon_by_variance:
-    print("mat.shape", mat.shape)
     feature_means = np.asarray(mat.mean(axis=0)).reshape(-1)
-    varsum = None
-    for row in mat:
+    def row_to_var(row):
         row = np.asarray(row.todense()).reshape(-1)
         tmp = row - feature_means
         tmp *= tmp
-        if varsum is not None:
-            varsum += tmp
-        else:
-            varsum = tmp
+        return tmp
+    varsum = row_to_var(mat[0])
+    for row in mat[1:]:
+        varsum += row_to_var(row)
     feature_variances = varsum / mat.shape[0]
-    '''
-    for idx, var in enumerate(feature_variances):
-        if var > 0.:
-            print(f"feature {idx} had variance {var}", file=sys.stderr)
-    '''
     scaled_variances = (feature_variances / (feature_means + 1e-4))
     if recon_loss_weights is None:
-        recon_loss_weights = scaled_variances
-    else:
-        recon_loss_weights *= scaled_variances
+        recon_loss_weights = recon_loss_weights = torch.ones_like(scaled_variances)
+    recon_loss_weights *= scaled_variances
     recon_loss_weights = torch.from_numpy(recon_loss_weights)
 
 f16 = None
 if args.compile:
     f16 = torch.from_numpy(mat[:37, :].todense().astype(np.float32))
+    ''''
     if compute_class_loss:
         label16 = torch.nn.functional.one_hot(labels[:37], num_classes=num_labels)
         f16 = torch.cat([f16, label16], axis=1)
-    module = torch.jit.trace(model, f16, check_trace=False)
+    '''
+    module = torch.jit.trace(model, f16, check_trace=1)
     traced_module = module
     import datetime
     s = str(datetime.datetime.now()).replace(" ", "_")
@@ -170,6 +163,7 @@ model.eval()
 opt = torch.optim.Adam(model.parameters(), lr=args.lr)
 
 for epoch_id in range(args.epochs):
+    print(f"{epoch_id}/{args.epochs}", file=sys.stderr)
     randperm = torch.randperm(num_train)
     model.train()
     backprop_count = 0
@@ -182,10 +176,7 @@ for epoch_id in range(args.epochs):
         #print("train_vals:", train_vals)
         idxtouse = train_vals[idxtouse]
         submatrix = torch.from_numpy(mat[idxtouse].todense().astype(np.float32))
-        label_arg = []
-        if compute_class_loss:
-            sublabels = labels[idxtouse]
-            label_arg = [sublabels]
+        label_arg = [labels[idxtouse]] if compute_class_loss else []
             # print("label arg: ", label_arg, file=sys.stdout)
         res = model(submatrix, label_arg)
         unpacked_out = model.unpack(res)
@@ -199,13 +190,13 @@ for epoch_id in range(args.epochs):
             class_loss = class_logits = None
         model_loss, recon_loss = losses[:2]
 
-        print(recon_loss.shape, recon_loss_weights.shape, "are the loss, weight shapes")
+        # print(recon_loss.shape, recon_loss.shape, "are the loss, weight shapes")
         if recon_loss_weights is not None:
             recon_loss = recon_loss[...,:num_genes] * recon_loss_weights
 
         assert class_loss is None or (len(losses) > 2 and losses[2] is not None)
 
-        print(f"loss sizes: elbo {model_loss.size()}, recon {recon_loss.size()}", file=sys.stderr)
+        # print(f"loss sizes: elbo {model_loss.size()}, recon {recon_loss.size()}", file=sys.stderr)
         loss = model_loss.sum(axis=1) + recon_loss.sum(axis=1)
         if class_loss is not None and args.class_loss_ratio > 0.:
             loss += class_loss.sum(axis=1) * args.class_loss_ratio
@@ -240,7 +231,7 @@ for epoch_id in range(args.epochs):
         end = start + args.batch_size
         idxtouse = randperm[start:end]
         submatrix = torch.from_numpy(mat[idxtouse, :].todense().astype(np.float32))
-        label_arg = [labels[idxtouse]]
+        label_arg = [labels[idxtouse]] if compute_class_loss else []
         latent, losses, zinb, class_info = model.unpack(model(submatrix, label_arg))
         latent_repr, sampled_repr, nb_model, logvar, full_cov = latent
         outfile[idxtouse,:] = latent_repr.detach()
@@ -250,15 +241,21 @@ for epoch_id in range(args.epochs):
             class_loss = class_logits = None
         model_loss, recon_loss = losses[:2]
         if model_test_loss is None:
-            model_test_loss = model_loss.sum(-1)
-            recon_test_loss = recon_loss.sum(-1)
+            model_test_loss = model_loss.sum(0)
+            recon_test_loss = recon_loss.sum(0)
+            #print(f"init model_loss shape: {model_loss.shape}")
+            #print(f"init model_test_loss shape: {model_test_loss.shape}")
+            #print(f"init recon_loss shape: {recon_loss.shape}")
             if class_loss is not None:
-                class_test_loss = class_loss.sum(-1)
+                class_test_loss = class_loss.sum(0)
             continue
-        model_test_loss += model_loss.sum(-1)
-        recon_test_loss += recon_loss.sum(-1)
+        #print(f"model_loss shape: {model_loss.shape}")
+        #print(f"recon_loss shape: {recon_loss.shape}")
+        #print(f"model_test_loss shape: {model_test_loss.shape}")
+        recon_test_loss += recon_loss.sum(0)
+        model_test_loss += model_loss.sum(0)
         if class_loss is not None:
-            class_test_loss += class_loss.sum(-1)
+            class_test_loss += class_loss.sum(0)
     print(f"[After epoch {epoch_id + 1} - Mean test loss: {model_test_loss.mean().item()} for model fit, {recon_test_loss.mean().item()} for reconstruction.", file=sys.stderr)
     if class_test_loss is not None:
         print(f"[After epoch {epoch_id + 1} - Mean class test loss: {class_test_loss.mean().item()}", file=sys.stderr)
@@ -294,6 +291,16 @@ print(
 
 # Now try to compile
 if args.compile:
+    print("Try jit script")
+    try:
+        module = torch.jit.compile(model)
+        torch.manual_seed(0)
+        out_compile = module(f16)
+        assert torch.allclose(out_orig, out_compile)
+    except:
+        pass
+
+    print("Try torch.compile")
     module = torch.compile(model)
     torch.manual_seed(0)
     out_compile = module(f16)
