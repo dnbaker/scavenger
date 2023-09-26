@@ -1,8 +1,5 @@
-use crate::nnutil;
-use tch::{
-    nn, nn::BatchNormConfig, nn::Module, nn::ModuleT, nn::SequentialT, Device, IndexOp, Kind,
-    Tensor,
-};
+use tch::nn;
+use tch::{Device, Kind, Tensor};
 
 struct LatentGM {
     n_components: i64,
@@ -74,13 +71,13 @@ impl LatentGM {
                 Default::default(),
             ))
             .add_fn(|xs| xs.softmax(-1i64, xs.kind()));
-        let prior_pi_logits = Tensor::randn(&[n_components], (kind, vs.device()));
+        let prior_pi_logits = Tensor::randn([n_components], (kind, vs.device()));
         let num_covar_inputs = if full_cov {
             nchoose2plusn(latent_dim)
         } else {
             latent_dim // diagonal cov
         } * n_components;
-        let num_input_features = latent_dim + n_components;
+        // let num_input_features = latent_dim + n_components;
         let q_z_covar = nn::seq_t()
             .add(nn::linear(
                 vs.root() / "q_z_covar",
@@ -124,9 +121,9 @@ impl LatentGM {
 }
 
 mod tests {
-    use crate::gaussian::*;
     #[test]
     fn test_stuff() {
+        use crate::gaussian::*;
         /*
         pub fn new(
             &self,

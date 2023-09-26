@@ -145,10 +145,10 @@ impl CSRMatrix {
         let mut mat = Tensor::zeros(&[numrows, self.shape[1]], (self.kind, self.data.device()));
         for (row_idx, slice) in indptr.windows(2).enumerate() {
             log::debug!("row {} and slice {:?}", row_idx, slice);
-            let slice = (slice[0] as i64)..(slice[1] as i64);
+            let slice = (slice[0])..(slice[1]);
             let slice_len = slice.end - slice.start;
             let xvals = self.data.new_full(
-                &[slice_len],
+                [slice_len],
                 row_idx as i64,
                 (Kind::Int64, self.data.device()),
             );
@@ -185,7 +185,7 @@ impl CSRMatrix {
             start: indptr_start,
             end: indptr_stop,
         };
-        let data_indices = Tensor::of_slice(data_indices.as_slice());
+        let data_indices = Tensor::from_slice(data_indices.as_slice());
         let col_indices = self.indices.i(sparse_indices.clone()).to_kind(Kind::Int);
         let data = self.data.i(sparse_indices).to_kind(self.kind);
         // Not a true CSR, but I still have to use the api...
@@ -200,15 +200,15 @@ impl CSRMatrix {
         sparse_mat.to_dense(self.kind)
         */
         // TODO: make this just one index_put_ call somehow.
-        let mut mat = Tensor::zeros(&[numrows, self.shape[1]], (self.kind, self.data.device()));
+        let mut mat = Tensor::zeros([numrows, self.shape[1]], (self.kind, self.data.device()));
         for (row_idx, slice) in indptr.windows(2).enumerate() {
             log::debug!("row {} and slice {:?}", row_idx, slice);
-            let slice = (slice[0] as i64)..(slice[1] as i64);
+            let slice = (slice[0])..(slice[1]);
             let slice_len = slice.end - slice.start;
             let col_idx = self.indices.i(slice.clone()).to_kind(Kind::Int);
             let data_val = self.data.i(slice);
             let xvals = self.data.new_full(
-                &[slice_len],
+                [slice_len],
                 row_idx as i64,
                 (Kind::Int64, self.data.device()),
             );
@@ -319,9 +319,9 @@ pub mod tests {
         let nrows = 5;
         let ncols = 1000;
         let csrmat = CSRMatrix {
-            data: tch::Tensor::randn(&[NNZ], (Kind::Float, Device::Cpu)),
-            indices: tch::Tensor::of_slice(&indices[..]),
-            indptr: tch::Tensor::of_slice(&indptr[..]),
+            data: tch::Tensor::randn([NNZ], (Kind::Float, Device::Cpu)),
+            indices: tch::Tensor::from_slice(&indices[..]),
+            indptr: tch::Tensor::from_slice(&indptr[..]),
             shape: vec![nrows, ncols],
             kind: Kind::Float,
         };

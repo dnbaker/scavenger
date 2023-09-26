@@ -240,7 +240,7 @@ impl ZINBVAE {
     pub fn zero_inflate(&self) -> bool {
         self.settings.zero_inflate
     }
-    fn zero_grad(&mut self) {
+    pub fn zero_grad(&mut self) {
         self.decoder.zero_grad();
         self.meanvar_encoder.ws.zero_grad();
         if let Some(ref mut bias) = &mut self.meanvar_encoder.bs {
@@ -615,9 +615,7 @@ pub trait Variance {
 impl Variance for ZINB {
     fn variance(&self) -> Tensor {
         let mean = self.mean();
-        (&mean * (1. + &mean)) / &self.theta
-        // not strictly correct for the zero-inflated case,
-        // but I don't have math for it and it's probably not an issue
+        &mean + (&mean.square() / &self.theta)
     }
 }
 
@@ -634,24 +632,21 @@ impl Mean for ZINB {
 
 impl ZINB {
     pub fn new(inputs: (Tensor, Tensor, Tensor, Tensor)) -> Self {
+        let (scale, theta, mu, zi_logits) = inputs;
         Self {
+            mu,
+            theta,
+            zi_logits,
+            scale,
+        }
+        /*
             mu: inputs.2,        // rate
             theta: inputs.1,     // r
             zi_logits: inputs.3, // dropout, aka pi
             scale: inputs.0,     // scale
-        }
+        */
     }
 
-    /*
-        @property
-        def mean(self):  # noqa: D102
-            return self.mu
-
-        @property
-        def variance(self):  # noqa: D102
-            return self.mean + (self.mean**2) / self.theta
-
-    */
     pub fn scale_v(&self) -> &Tensor {
         &self.scale
     }

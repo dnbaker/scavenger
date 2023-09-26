@@ -126,11 +126,11 @@ fn main() -> Result<(), tch::TchError> {
         .to_device(vs.device())
         .enumerate()
     {
+        /*
         let current_bs = bdata.size2().unwrap().0 as i32;
         total_samples += current_bs;
         // let bdata = bdata.to_kind(tch::Kind::Float).log1p();
         let data_output = vae.forward_t(&bdata, settings.train);
-        /*
         let (latent_data, losses, _zinb_model) = vae.unpack_output(&data_output);
         let (kl, recon) = losses;
         let recon_loss = recon.sum(tch::Kind::Float);

@@ -8,7 +8,7 @@ default-run = "csr-vae-zinb"
 
 [dependencies]
 
-tch = { version = "*", path = "../tch2-rs" }
+tch = "0.13.0"
 memmap = "*"
 clap = {version = "*", features = ["derive"]}
 log = "*"
