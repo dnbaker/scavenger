@@ -116,7 +116,7 @@ def tril2full_and_nonneg(tril, dim, nonneg_function=F.softplus):
 
 
 
-def process_label_set(ls, num_labels, temp=10., dtype=None):
+def process_label_set(ls, num_labels, temp=10., dtype=None, device=None):
     # Handles logits (directly)
     # and converts tokens to one_hot.
     # temp defaults to  10., which means true labels are 20,000 more likely than the false ones.
@@ -124,19 +124,19 @@ def process_label_set(ls, num_labels, temp=10., dtype=None):
         ls = torch.from_numpy(ls)
     if ls.dtype is torch.long:
         ls = torch.nn.functional.one_hot(ls, num_labels) * temp
-    ls = ls.to(dtype)
+    ls = ls.to(device, dtype)
     return ls
 
 
 
-def encoded_labels(categorical_labels, *, temp, class_sizes, dtype):
+def encoded_labels(categorical_labels, *, temp, class_sizes, dtype, batch_size, device):
     num_cats = sum(class_sizes)
     if categorical_labels is not None:
-        label_inputs = [process_label_set(labels, num_labels, temp=temp, dtype=dtype) for labels, num_labels in zip(categorical_labels, class_sizes)]
+        label_inputs = [process_label_set(labels, num_labels,temp=temp, dtype=dtype) for labels, num_labels in zip(categorical_labels, class_sizes)]
         # print("shape before cat labels: ", [x.shape for x in label_inputs])
     elif num_cats > 0:
         # If categorical labels are not present, just leave as 0.
-        label_inputs = [torch.zeros((x.shape[0], num_cats), dtype=x.dtype)]
+        label_inputs = [torch.zeros((batch_size, num_cats), dtype=dtype, device=device)]
     else:
         label_inputs = None
     return label_inputs
@@ -296,7 +296,7 @@ class NBVAE(nn.Module):
         ## Preprocess cats
         assert categorical_labels is None or len(categorical_labels) == len(self.categorical_class_sizes), f"{categorical_labels} and sizes {self.categorical_class_sizes}"
         num_cats = sum(self.categorical_class_sizes)
-        label_inputs = encoded_labels(categorical_labels, class_sizes=self.categorical_class_sizes, temp=temp, dtype=x.dtype)
+        label_inputs = encoded_labels(categorical_labels, class_sizes=self.categorical_class_sizes, temp=temp, dtype=x.dtype, batch_size=x.shape[0], device=x.device)
         # After processing, we've concatenated the logits-encoded labels
         if label_inputs is not None:
             x = torch.cat([x] + label_inputs, axis=1)
