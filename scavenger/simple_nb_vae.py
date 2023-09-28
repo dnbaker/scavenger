@@ -244,8 +244,8 @@ class NBVAE(nn.Module):
         meanvar = self.meanvar_encoder(latent)
         mu = meanvar[:, :self.latent_dim]
         if self.full_cov:
-            full_cov = tril2full_and_nonneg(F.softplus(
-                meanvar[:, self.latent_dim:]), self.latent_dim, self.nonneg_function)
+            full_cov = tril2full_and_nonneg(
+                meanvar[:, self.latent_dim:], self.latent_dim, self.nonneg_function)
             # dist = torch.distributions.MultivariateNormal(loc=mu, scale_tril=full_cov)
             # gen = dist.rsample()
             batch_size = x.shape[0]
