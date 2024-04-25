@@ -119,8 +119,9 @@ if args.scale_recon_by_variance:
     feature_variances = varsum / mat.shape[0]
     scaled_variances = torch.from_numpy(feature_variances / (feature_means + 1e-4))
     if recon_loss_weights is None:
-        recon_loss_weights = recon_loss_weights = torch.ones_like(scaled_variances)
+        recon_loss_weights = torch.ones_like(scaled_variances)
     recon_loss_weights *= scaled_variances
+print(recon_loss_weights.median(), "as mean reconstruction loss weights")
 
 f16 = None
 if args.compile:
@@ -248,6 +249,8 @@ for epoch_id in range(args.epochs):
             if class_loss is not None:
                 class_test_loss = class_loss.sum(0)
             continue
+        if recon_loss_weights is not None:
+            recon_loss = recon_loss[...,:num_genes] * recon_loss_weights
         #print(f"model_loss shape: {model_loss.shape}")
         #print(f"recon_loss shape: {recon_loss.shape}")
         #print(f"model_test_loss shape: {model_test_loss.shape}")

@@ -1,4 +1,8 @@
+This is a playground testing some basic VAE ideas applied to sparse count data, including full covariance latent space.
 
+None of it is ideal for production use, and it is not integrated with scvi-hub or similar; however, the code works and can serve as building blocks.
+
+It is also implemented in both Python via pytorch and libtorch via tch-rs in Rust. This allows us to eliminate the python runtime for applications.
 
 ##Contents
 

@@ -11,7 +11,6 @@ from scavenger.components import nchoose2, default_size, in_outs, ULayerSet, Lay
 VAR_EPS = 1e-4
 
 
-
 def log_likelihood_nb(x, mu, theta, scale):
     log_theta_mu_eps = (theta + mu + VAR_EPS).log()
     log_mu_eps = (mu + VAR_EPS).log()
